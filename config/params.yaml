@@ -15,7 +15,7 @@ fast_limo:
 
     num_threads: 20 # OpenMP threads (will be equal to $(nproc) if it is set higher)
 
-    sensor_type: 1  # LiDAR type (0: OUSTER \ 1: VELODYNE \ 2: HESAI \ 3: LIVOX)
+    sensor_type: 2  # LiDAR type (0: OUSTER \ 1: VELODYNE \ 2: HESAI \ 3: LIVOX)
 
     debug: true     # fill useful intermediate pcl (deskewed, final_raw...) for visualizing purposes
     verbose: true   # print debug/performance board
@@ -71,7 +71,7 @@ fast_limo:
         value: 180.0  # [deg]
       
       rateSampling: # quick downsample
-        active: false
+        active: true
         value: 4
 
     iKFoM:  # Iterative Kalman Filter on Manifolds lib

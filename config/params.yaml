@@ -4,8 +4,8 @@ fast_limo:
   ros__parameters:
     topics:
       input:
-        lidar: /velodyne_points
-        imu: /imu/data
+        lidar: /lidar_points
+        imu: /lidar_imu
       # output:
 
     frames: # output frames (the transform between frames will be broadcasted)
@@ -20,7 +20,7 @@ fast_limo:
     debug: true     # fill useful intermediate pcl (deskewed, final_raw...) for visualizing purposes
     verbose: true   # print debug/performance board
 
-    estimate_extrinsics: true   # continuous estimation of LiDAR-IMU extrinsics 
+    estimate_extrinsics: false   # continuous estimation of LiDAR-IMU extrinsics 
     time_offset: true           # whether to take into account a possible sync offset between IMU and LiDAR (set to true if they are not properly in sync)
     end_of_sweep: false         # whether the sweep reference time is w.r.t. the start or the end of the scan (only applies to VELODYNE/OUSTER)
 
@@ -32,15 +32,15 @@ fast_limo:
 
     extrinsics: # w.r.t baselink [SI]
       imu:
-        t: [ 0., 0., 0. ]
-        R: [ 1.,  0.,  0.,
-              0.,  1.,  0.,
-              0.,  0.,  1. ]
+        t: [ 0., 0., -0.9 ]
+        R: [  0.0007963, -0.9999997,  0.0000000,
+              0.9999997,  0.0007963,  0.0000000,
+              0.0000000,  0.0000000,  1.0000000 ] # 90 deg around Z
       lidar:
-        t: [ 0.,  0.,  0. ]
-        R: [ 1.,  0.,  0.,
-              0.,  1.,  0.,
-              0.,  0.,  1. ]
+        t: [ 0.,  0.,  -0.9 ]
+        R: [  0.0007963, -0.9999997,  0.0000000,
+              0.9999997,  0.0007963,  0.0000000,
+              0.0000000,  0.0000000,  1.0000000 ] # 90 deg around Z
 
     intrinsics:
       accel:
@@ -72,7 +72,7 @@ fast_limo:
       
       rateSampling: # quick downsample
         active: true
-        value: 4
+        value: 3
 
     iKFoM:  # Iterative Kalman Filter on Manifolds lib
       MAX_NUM_ITERS: 2                # max num+1 of iterations of the KF (limits comp. load)

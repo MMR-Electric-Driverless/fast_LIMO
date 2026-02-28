@@ -106,8 +106,20 @@ namespace ros2wrap {
                ///////////////////////////////////////             Callbacks            ///////////////////////////////////////////////////////////// 
                ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////// */
 
+            std::mutex m_last_cloud_mtx;
+            struct CloudStamps {
+                std::chrono::nanoseconds stamp;
+                std::chrono::nanoseconds trace_start;
+                std::chrono::nanoseconds trace_end;
+            } m_last_cloud;
+
             void lidar_callback(const sensor_msgs::msg::PointCloud2 & msg) {
-                
+                {
+                    std::scoped_lock lock(m_last_cloud_mtx);
+                    m_last_cloud.stamp = std::chrono::nanoseconds(rclcpp::Time(msg.header.stamp).nanoseconds());
+                    m_last_cloud.trace_start = std::chrono::steady_clock::now().time_since_epoch();
+                }
+
                 fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
                 static bool pc_in_good_shape = this->checkPointcloudStructure(msg, loc.get_sensor_type());
 
@@ -174,12 +186,31 @@ namespace ros2wrap {
                 this->fromLimoToROS(loc.getWorldState(), loc.getPoseCovariance(), loc.getTwistCovariance(), state_msg);
                 this->fromLimoToROS(loc.getBodyState(), loc.getPoseCovariance(), loc.getTwistCovariance(), body_msg);
 
+                auto worldState = loc.getWorldState();
+
+                // Override timestamps for measuring latency :)
+
+
+                CloudStamps stamps;
+                {
+                    std::scoped_lock lock(m_last_cloud_mtx);
+                    stamps = m_last_cloud;
+                    ++m_last_cloud.stamp;
+                }
+
+                state_msg.header.stamp = rclcpp::Time(stamps.stamp.count());
+                body_msg.header.stamp = rclcpp::Time(stamps.stamp.count());
+                worldState.time = std::chrono::duration<double>(stamps.stamp).count();
+
+                static std::ofstream suca("~/limo_latency.csv");
+                suca << stamps.stamp.count() << "," << stamps.trace_start.count() << "," << stamps.trace_end.count() << "\n";
+
                 this->state_pub->publish(state_msg);
                 this->body_pub->publish(body_msg);
 
                 // TF broadcasting
                 if(this->publish_tf)
-                    this->broadcastTF(loc.getWorldState(), world_frame, body_frame, true);
+                    this->broadcastTF(worldState, world_frame, body_frame, true);
             }
 
         /* ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////// 

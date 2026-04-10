@@ -77,7 +77,10 @@ namespace ros2wrap {
                     imu_opt.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
                     // Set up subscribers
-                    auto qos = rclcpp::QoS(rclcpp::KeepLast(10), rmw_qos_profile_sensor_data);
+                    auto qos = rclcpp::QoS(rclcpp::SensorDataQoS());
+                    // depth is already 5 from the profile, override if needed:
+                    // qos.keep_last(10);
+
                     lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
                                     config.topics.lidar, qos, std::bind(&LimoWrapper::lidar_callback, this, std::placeholders::_1), lidar_opt);
                     imu_sub_   = this->create_subscription<sensor_msgs::msg::Imu>(
@@ -87,12 +90,16 @@ namespace ros2wrap {
                     pc_pub      = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/pointcloud", 1);
                     state_pub   = this->create_publisher<nav_msgs::msg::Odometry>("/fast_limo/state", 1);
 
+                    rclcpp::Parameter debug = this->get_parameter("debug");
+                    if(debug.as_bool())
+                    {
                     orig_pub     = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/original", 1);
                     desk_pub     = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/deskewed", 1);
                     match_pub    = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/match", 1);
                     finalraw_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/final_raw", 1);
                     body_pub     = this->create_publisher<nav_msgs::msg::Odometry>("/fast_limo/body", 1);
                     match_points_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/fast_limo/match_points", 1);
+                    }
 
                     // Init TF broadcaster
                     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);

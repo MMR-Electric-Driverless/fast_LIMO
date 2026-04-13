@@ -28,6 +28,7 @@ namespace ros2wrap {
             std::string world_frame;
             std::string body_frame;
 
+            bool debug;
             bool publish_tf;
 
         private:
@@ -71,6 +72,9 @@ namespace ros2wrap {
                     rclcpp::Parameter tf_pub = this->get_parameter("frames.tf_pub");
                     this->publish_tf = tf_pub.as_bool();
 
+                    rclcpp::Parameter debug_p = this->get_parameter("debug");
+                    this->debug = debug_p.as_bool();
+
                     // Define two callback groups (ensure parallel execution of lidar_callback & imu_callback)
                     rclcpp::SubscriptionOptions lidar_opt, imu_opt;
                     lidar_opt.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -90,8 +94,7 @@ namespace ros2wrap {
                     pc_pub      = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/pointcloud", 1);
                     state_pub   = this->create_publisher<nav_msgs::msg::Odometry>("/fast_limo/state", 1);
 
-                    rclcpp::Parameter debug = this->get_parameter("debug");
-                    if(debug.as_bool())
+                    if(this->debug)
                     {
                     orig_pub     = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/original", 1);
                     desk_pub     = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/deskewed", 1);
@@ -136,6 +139,7 @@ namespace ros2wrap {
                 this->pc_pub->publish(pc_ros);
 
                 // Publish debugging pointclouds
+                if(this->debug){
                 sensor_msgs::msg::PointCloud2 orig_msg;
                 pcl::toROSMsg(*loc.get_orig_pointcloud(), orig_msg);
                 orig_msg.header.stamp = this->get_clock()->now();
@@ -165,6 +169,7 @@ namespace ros2wrap {
                                                                                         this->world_frame
                                                                                         );
                 this->match_points_pub->publish(match_markers);
+                }
             }
 
             void imu_callback(const sensor_msgs::msg::Imu & msg) {
@@ -178,12 +183,15 @@ namespace ros2wrap {
                 loc.updateIMU(imu);
 
                 // State publishing
-                nav_msgs::msg::Odometry state_msg, body_msg;
+                nav_msgs::msg::Odometry state_msg; 
                 this->fromLimoToROS(loc.getWorldState(), loc.getPoseCovariance(), loc.getTwistCovariance(), state_msg);
-                this->fromLimoToROS(loc.getBodyState(), loc.getPoseCovariance(), loc.getTwistCovariance(), body_msg);
-
                 this->state_pub->publish(state_msg);
+                
+                if(this->debug){
+                nav_msgs::msg::Odometry body_msg;
+                this->fromLimoToROS(loc.getBodyState(), loc.getPoseCovariance(), loc.getTwistCovariance(), body_msg);
                 this->body_pub->publish(body_msg);
+                }
 
                 // TF broadcasting
                 if(this->publish_tf)

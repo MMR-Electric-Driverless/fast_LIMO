@@ -203,8 +203,7 @@ bool Relocator::applyKissMatcher() {
     const auto solution = matcher.estimate(srcVec, tgtVec);
     matcher.print();
 
-    kiss_matcher::KISSMatcherScore score = matcher.getScore();        
-    if (score.trans_inliers < this->cfg_.inliers_threshold) {
+   if (!solution.valid) {
         std::cout << "KISSMatcher failed to converge" << std::endl;
         return false;
     } else std::cout << "KISSMatcher converged" << std::endl;
@@ -241,8 +240,17 @@ bool Relocator::applyGICP(){
     // Filter the map around the pose found by KISSMatcher
     init_state_[0] = p[0];
     init_state_[1] = p[1];
-    this->passThroughFilter(this->target_map_, 20);
     
+	this->passThroughFilter(this->target_map_, 20);
+
+    if (this->aligned_cloud_->empty() || this->target_map_->empty()) {
+        std::cout << "GICP skipped: empty point cloud after cropping "
+                  << "(aligned_cloud size=" << this->aligned_cloud_->size()
+                  << ", target_map size=" << this->target_map_->size() << ")"
+                  << std::endl;
+        return false;
+    }
+
     pcl::copyPointCloud(*this->aligned_cloud_, *src_);
     pcl::copyPointCloud(*this->target_map_, *dst_);
         

@@ -1,2 +1,5 @@
 .vscode/*
 maps/*.pcd
+build/
+install/
+log/

@@ -82,12 +82,11 @@ namespace ros2wrap {
 
                 // Set up subscribers
                 lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                    config.topics.lidar, 1,
+                    config.topics.lidar, rclcpp::SensorDataQoS(),
                     std::bind(&LimoWrapper::lidar_callback, this, std::placeholders::_1),
                     lidar_opt);
-
                 imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
-                    config.topics.imu, 1000,
+                    config.topics.imu, rclcpp::SensorDataQoS(),
                     std::bind(&LimoWrapper::imu_callback, this, std::placeholders::_1),
                     imu_opt);
                 

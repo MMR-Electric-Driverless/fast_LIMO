@@ -41,6 +41,39 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 
+#=======================================
+# Zero Copy support
+#=======================================
+option(ENABLE_ZERO_COPY "Enable Zero Copy for ROS2 low latency comunication" OFF)
+
+if($ENV{RMW_FASTRTPS_USE_QOS_FROM_XML})
+  set(ENABLE_ZERO_COPY ON)
+endif()
+
+if(ENABLE_ZERO_COPY)
+  find_package(mmr_base QUIET)
+  if(mmr_base_FOUND)
+    message(
+      "============================================================\n"
+      "-- ZERO COPY is ENABLED\n"
+      "============================================================\n"
+    )
+    add_definitions(-DENABLE_ZERO_COPY)
+  else()
+    message(
+      "============================================================\n"
+      "-- ZERO COPY is DISABLED - mmr_base was NOT FOUND\n"
+      "============================================================\n"
+    )
+  endif()
+else()
+  message(
+    "============================================================\n"
+    "-- ZERO COPY is DISABLED - PLEASE SET ENV RMW_FASTRTPS_USE_QOS_FROM_XML=1 BEFORE BUILDING TO USE ZERO COPY\n"
+    "============================================================\n"
+  )
+endif()
+
 include_directories(
   include
   ${EIGEN3_INLCUDE_DIRS}
@@ -86,7 +119,15 @@ target_link_libraries(${PROJECT_NAME} ${PCL_LIBRARIES} ${OpenMP_LIBS} ikfom)
 add_executable(${PROJECT_NAME}_multi_exec
               src/LimoWrapper.cpp
               )
-ament_target_dependencies(${PROJECT_NAME}_multi_exec rclcpp sensor_msgs geometry_msgs visualization_msgs nav_msgs tf2 tf2_ros pcl_conversions)
+set(NODE_DEPENDENCIES
+  rclcpp sensor_msgs geometry_msgs visualization_msgs nav_msgs tf2 tf2_ros pcl_conversions
+)
+
+if(mmr_base_FOUND)
+  list(APPEND NODE_DEPENDENCIES "mmr_base")
+endif()
+
+ament_target_dependencies(${PROJECT_NAME}_multi_exec ${NODE_DEPENDENCIES})
 target_link_libraries(${PROJECT_NAME}_multi_exec ${PROJECT_NAME} ${PCL_LIBRARIES})
 
 # Binaries

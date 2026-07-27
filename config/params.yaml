@@ -2,6 +2,7 @@
 
 fast_limo:
   ros__parameters:
+    zero_copy: true
     topics:
       input:
         lidar: /lidar_points

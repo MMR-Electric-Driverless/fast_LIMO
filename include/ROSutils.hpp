@@ -31,6 +31,10 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
+#ifdef ENABLE_ZERO_COPY
+#include <mmr_base/msg/bounded_pointcloud.hpp> // zero copy pointcloud
+#endif
+
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 

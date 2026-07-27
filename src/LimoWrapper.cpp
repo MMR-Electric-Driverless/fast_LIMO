@@ -30,11 +30,15 @@ namespace ros2wrap {
 
             bool debug;
             bool publish_tf;
+            bool zero_copy;
 
         private:
                 // subscribers
-            rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr lidar_sub_;
-            rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr         imu_sub_;
+            rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr      lidar_sub_;
+            #ifdef ENABLE_ZERO_COPY
+            rclcpp::Subscription<mmr_base::msg::BoundedPointcloud>::SharedPtr   bounded_lidar_sub_;
+            #endif
+            rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr              imu_sub_;
 
                 // main publishers
             rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pc_pub;
@@ -75,6 +79,9 @@ namespace ros2wrap {
                     rclcpp::Parameter debug_p = this->get_parameter("debug");
                     this->debug = debug_p.as_bool();
 
+                    rclcpp::Parameter zero_copy_p = this->get_parameter("zero_copy");
+                    this->zero_copy = zero_copy_p.as_bool();
+
                     // Define two callback groups (ensure parallel execution of lidar_callback & imu_callback)
                     rclcpp::SubscriptionOptions lidar_opt, imu_opt;
                     lidar_opt.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -85,8 +92,24 @@ namespace ros2wrap {
                     // depth is already 5 from the profile, override if needed:
                     // qos.keep_last(10);
 
-                    lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-                                    config.topics.lidar, qos, std::bind(&LimoWrapper::lidar_callback, this, std::placeholders::_1), lidar_opt);
+                    if(this->zero_copy){    // zero copy just on lidar for now
+                    #ifdef ENABLE_ZERO_COPY
+                        bounded_lidar_sub_ = this->create_subscription<mmr_base::msg::BoundedPointcloud>(
+                                    config.topics.lidar, qos, std::bind(&LimoWrapper::boundedpointcloud_callback, this, std::placeholders::_1), lidar_opt);
+                    #else
+                        RCLCPP_ERROR_STREAM(this->get_logger(), "\n-------------------------------------------------------------------\n"
+                                            << "FAST_LIMO::FATAL ERROR: zero_copy is enabled but fast_limo was built WITHOUT zero copy support!\n"
+                                            << "          Rebuild with RMW_FASTRTPS_USE_QOS_FROM_XML=1 (or -DENABLE_ZERO_COPY=ON) and mmr_base\n"
+                                            << "          available, or set zero_copy to false in the config file.\n"
+                                            << "-------------------------------------------------------------------\n"
+                                            );
+                        throw std::runtime_error("FAST_LIMO::FATAL ERROR: zero copy support not compiled in\n\n");
+                    #endif
+                    }
+                    else{
+                        lidar_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                                    config.topics.lidar, qos, std::bind(&LimoWrapper::pointcloud_callback, this, std::placeholders::_1), lidar_opt);
+                    }
                     imu_sub_   = this->create_subscription<sensor_msgs::msg::Imu>(
                                     config.topics.imu, qos, std::bind(&LimoWrapper::imu_callback, this, std::placeholders::_1), imu_opt);
                     
@@ -117,8 +140,59 @@ namespace ros2wrap {
                ///////////////////////////////////////             Callbacks            ///////////////////////////////////////////////////////////// 
                ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////// */
 
-            void lidar_callback(const sensor_msgs::msg::PointCloud2 & msg) {
-                
+            /**
+             * reference for zero copy:
+                # Sensor frame-start timestamp.
+                builtin_interfaces/Time stamp
+
+                # Number of valid points (<= DATA_MAX_POINTS).
+                uint32 width
+
+                # Fixed-size payload. Only the first `width * POINT_STEP` bytes are valid;
+                # the remaining bytes are unused padding required to keep the message a
+                # plain (constant-size) type.
+                #
+                # Per-point layout (26 bytes):
+                #
+                #   sensor_msgs/PointField[]                 offset  datatype  count
+                #   --------------------------------------------------------------------
+                #   { name: "x",         offset:  0, datatype: FLOAT32 (7), count: 1 }
+                #   { name: "y",         offset:  4, datatype: FLOAT32 (7), count: 1 }
+                #   { name: "z",         offset:  8, datatype: FLOAT32 (7), count: 1 }
+                #   { name: "intensity", offset: 12, datatype: FLOAT32 (7), count: 1 }
+                #   { name: "ring",      offset: 16, datatype: UINT16  (4), count: 1 }
+                #   { name: "timestamp", offset: 18, datatype: FLOAT64 (8), count: 1 }
+                #                                              total = 26 bytes
+                uint8[3407872] data
+
+                # Constants
+                uint32 POINT_STEP=26
+                uint32 DATA_MAX_POINTS=128000
+                uint32 DATA_MAX_BYTES=3407872
+             */
+
+            #ifdef ENABLE_ZERO_COPY
+            /* Zero copy entry point: the BoundedPointcloud layout is known at compile time,
+               so the payload is unpacked by hand (no PointField metadata is transmitted). */
+            void boundedpointcloud_callback(const mmr_base::msg::BoundedPointcloud & msg) {
+
+                fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
+                static bool pc_in_good_shape = this->checkPointcloudStructure(loc.get_sensor_type());
+
+                if(not pc_in_good_shape){
+                    throw std::runtime_error("FAST_LIMO::FATAL ERROR: invalid pointcloud structure\n\n");
+                }
+
+                pcl::PointCloud<PointType>::Ptr pc_ (std::make_shared<pcl::PointCloud<PointType>>());
+                this->fromROStoLimo(msg, *pc_);
+
+                this->lidar_callback(pc_, rclcpp::Time(msg.stamp).seconds());
+            }
+            #endif
+
+            /* Standard entry point */
+            void pointcloud_callback(const sensor_msgs::msg::PointCloud2 & msg) {
+
                 fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
                 static bool pc_in_good_shape = this->checkPointcloudStructure(msg, loc.get_sensor_type());
 
@@ -129,46 +203,36 @@ namespace ros2wrap {
                 pcl::PointCloud<PointType>::Ptr pc_ (std::make_shared<pcl::PointCloud<PointType>>());
                 pcl::fromROSMsg(msg, *pc_);
 
-                loc.updatePointCloud(pc_, rclcpp::Time(msg.header.stamp).seconds());
+                this->lidar_callback(pc_, rclcpp::Time(msg.header.stamp).seconds());
+            }
+
+            /* Common LiDAR pipeline (input agnostic). All outputs are standard PointCloud2. */
+            void lidar_callback(pcl::PointCloud<PointType>::Ptr& pc_, double stamp) {
+
+                fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
+
+                loc.updatePointCloud(pc_, stamp);
+
+                /* NOTE: every pointcloud below is serialized on publish (~32 B/point), so all of
+                    them are gated on having at least one subscriber. Nobody listening, no cost. */
 
                 // Publish output pointcloud
-                sensor_msgs::msg::PointCloud2 pc_ros;
-                pcl::toROSMsg(*loc.get_pointcloud(), pc_ros);
-                pc_ros.header.stamp = this->get_clock()->now();
-                pc_ros.header.frame_id = this->world_frame;
-                this->pc_pub->publish(pc_ros);
+                this->publishPointCloud(this->pc_pub, loc.get_pointcloud(), this->world_frame);
 
                 // Publish debugging pointclouds
                 if(this->debug){
-                sensor_msgs::msg::PointCloud2 orig_msg;
-                pcl::toROSMsg(*loc.get_orig_pointcloud(), orig_msg);
-                orig_msg.header.stamp = this->get_clock()->now();
-                orig_msg.header.frame_id = this->body_frame;
-                this->orig_pub->publish(orig_msg);
-
-                sensor_msgs::msg::PointCloud2 deskewed_msg;
-                pcl::toROSMsg(*loc.get_deskewed_pointcloud(), deskewed_msg);
-                deskewed_msg.header.stamp = this->get_clock()->now();
-                deskewed_msg.header.frame_id = this->world_frame;
-                this->desk_pub->publish(deskewed_msg);
-
-                sensor_msgs::msg::PointCloud2 match_msg;
-                pcl::toROSMsg(*loc.get_pc2match_pointcloud(), match_msg);
-                match_msg.header.stamp = this->get_clock()->now();
-                match_msg.header.frame_id = this->body_frame;
-                this->match_pub->publish(match_msg);
-
-                sensor_msgs::msg::PointCloud2 finalraw_msg;
-                pcl::toROSMsg(*loc.get_finalraw_pointcloud(), finalraw_msg);
-                finalraw_msg.header.stamp = this->get_clock()->now();
-                finalraw_msg.header.frame_id = this->world_frame;
-                this->finalraw_pub->publish(finalraw_msg);
+                this->publishPointCloud(this->orig_pub,     loc.get_orig_pointcloud(),     this->body_frame);
+                this->publishPointCloud(this->desk_pub,     loc.get_deskewed_pointcloud(), this->world_frame);
+                this->publishPointCloud(this->match_pub,    loc.get_pc2match_pointcloud(), this->body_frame);
+                this->publishPointCloud(this->finalraw_pub, loc.get_finalraw_pointcloud(), this->world_frame);
 
                 // Visualize current matches
-                visualization_msgs::msg::MarkerArray match_markers = this->getMatchesMarker(loc.get_matches(), 
-                                                                                        this->world_frame
-                                                                                        );
-                this->match_points_pub->publish(match_markers);
+                if(this->match_points_pub->get_subscription_count() > 0){
+                    visualization_msgs::msg::MarkerArray match_markers = this->getMatchesMarker(loc.get_matches(),
+                                                                                            this->world_frame
+                                                                                            );
+                    this->match_points_pub->publish(match_markers);
+                }
                 }
             }
 
@@ -362,6 +426,42 @@ namespace ros2wrap {
                 out.q = qd.cast<float>();
             }
 
+            void publishPointCloud(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr& pub,
+                                    pcl::PointCloud<PointType>::ConstPtr pc, const std::string& frame_id){
+
+                if(pub->get_subscription_count() < 1) return; // don't pay for the serialization if nobody is listening
+
+                sensor_msgs::msg::PointCloud2 pc_ros;
+                pcl::toROSMsg(*pc, pc_ros);
+                pc_ros.header.stamp = this->get_clock()->now();
+                pc_ros.header.frame_id = frame_id;
+                pub->publish(pc_ros);
+            }
+
+            #ifdef ENABLE_ZERO_COPY
+            void fromROStoLimo(const mmr_base::msg::BoundedPointcloud& in, pcl::PointCloud<PointType>& out){
+
+                using BPC = mmr_base::msg::BoundedPointcloud;
+
+                const uint32_t n_points = std::min(in.width, BPC::DATA_MAX_POINTS);
+
+                out.points.resize(n_points);
+                out.width    = n_points;
+                out.height   = 1;
+                out.is_dense = false;
+
+                const uint8_t* p = in.data.data();
+                for(uint32_t i=0; i < n_points; i++, p += BPC::POINT_STEP){
+                    PointType& pt = out.points[i];
+                    std::memcpy(&pt.x,         p +  0, 4);
+                    std::memcpy(&pt.y,         p +  4, 4);
+                    std::memcpy(&pt.z,         p +  8, 4);
+                    std::memcpy(&pt.intensity, p + 12, 4);
+                    std::memcpy(&pt.timestamp, p + 18, 8); // NOTE: ring (offset 16, UINT16) is unused by fast_limo
+                }
+            }
+            #endif
+
             void fromLimoToROS(const fast_limo::State& in, nav_msgs::msg::Odometry& out){
                 out.header.stamp = this->get_clock()->now();
                 out.header.frame_id = "map";
@@ -429,6 +529,33 @@ namespace ros2wrap {
                 // Broadcast
                 tf_broadcaster_->sendTransform(tf_msg);
             }
+
+            #ifdef ENABLE_ZERO_COPY
+            bool checkPointcloudStructure(fast_limo::SensorType sensor){
+
+                /* NOTE: BoundedPointcloud carries no PointField metadata, its layout is fixed at
+                    compile time and its timestamp field is an absolute FLOAT64, so it can only
+                    feed a HESAI/LIVOX alike configuration. */
+
+                if( (sensor == fast_limo::SensorType::HESAI) || (sensor == fast_limo::SensorType::LIVOX) )
+                    return true;
+
+                RCLCPP_ERROR_STREAM(this->get_logger(), "\n-------------------------------------------------------------------\n"
+                                    << "FAST_LIMO::FATAL ERROR: zero copy (BoundedPointcloud) input is only compatible\n"
+                                    << "          with HESAI/LIVOX alike pointclouds, as its fixed layout is:\n"
+                                    << "                  x: FLOAT32 (offset 0)\n"
+                                    << "                  y: FLOAT32 (offset 4)\n"
+                                    << "                  z: FLOAT32 (offset 8)\n"
+                                    << "                  intensity: FLOAT32 (offset 12)\n"
+                                    << "                  ring: UINT16 (offset 16)\n"
+                                    << "                  timestamp: FLOAT64 (offset 18, global time in seconds)\n"
+                                    << "          Either set sensor_type to 2 (HESAI) / 3 (LIVOX) or disable zero_copy.\n"
+                                    << "-------------------------------------------------------------------\n"
+                                    );
+
+                return false;
+            }
+            #endif
 
             bool checkPointcloudStructure(const sensor_msgs::msg::PointCloud2 & msg, fast_limo::SensorType sensor){
 

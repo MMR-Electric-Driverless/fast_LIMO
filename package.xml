@@ -5,7 +5,7 @@
   <version>0.0.0</version>
   <description>The fast_limo package in ROS2</description>
 
-  <maintainer email="oriol.martinez.fite@gmail.com">fetty</maintainer>
+  <maintainer email="leo.nels.2000@gmail.com">leonardo nels</maintainer>
 
   <license>Apache License 3.0</license>
 
@@ -19,6 +19,8 @@
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>pcl_conversions</depend>
+  <build_depend condition="$RMW_FASTRTPS_USE_QOS_FROM_XML == 1">mmr_base</build_depend>
+  <exec_depend condition="$RMW_FASTRTPS_USE_QOS_FROM_XML == 1">mmr_base</exec_depend>
 
   <exec_depend>ros2launch</exec_depend>
 

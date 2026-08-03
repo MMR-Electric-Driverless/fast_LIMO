@@ -5,18 +5,24 @@ project(fast_limo)
 add_compile_options(-std=c++17)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  # -Wpedantic only ever fires inside the vendored IKFoM (mtk) headers, and
+  # -Wpsabi is an aarch64 ABI note we cannot act on. IKFoM's own warnings are
+  # muted by exposing it as a SYSTEM include dir (see the ikfom target below).
+  add_compile_options(-Wall -Wextra -Wno-psabi)
 endif()
+
+# Silences boost/bind.hpp's deprecation pragma, pulled in by esekfom.hpp.
+add_definitions(-DBOOST_BIND_GLOBAL_PLACEHOLDERS)
 
 set(CMAKE_BUILD_TYPE "Release")
 
 find_package( PCL 1.12 REQUIRED )
-include_directories(${PCL_INCLUDE_DIRS})
+include_directories(SYSTEM ${PCL_INCLUDE_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 link_directories(${PCL_LIBRARY_DIRS})
 
 find_package( Eigen3 REQUIRED )
-include_directories(${EIGEN3_INCLUDE_DIR})
+include_directories(SYSTEM ${EIGEN3_INCLUDE_DIR})
 
 include(FindOpenMP)
 if(OPENMP_FOUND)
@@ -98,8 +104,11 @@ add_library(ikfom
             )
 
 target_link_libraries(ikfom ${PCL_LIBRARIES} ${OpenMP_LIBS})
-target_include_directories(ikfom
-  PUBLIC include/IKFoM/ include/IKFoM/IKFoM_toolkit 
+# SYSTEM: IKFoM is vendored third-party code. Consumers reach it via
+# `#include <use-ikfom.hpp>`, which resolves through -isystem, so GCC mutes
+# warnings there and in every header it pulls in transitively.
+target_include_directories(ikfom SYSTEM
+  PUBLIC include/IKFoM/ include/IKFoM/IKFoM_toolkit
 )
 
 # Fast LIMO

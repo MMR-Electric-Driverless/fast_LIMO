@@ -20,10 +20,12 @@
 // class fast_limo::Localizer
     // public
 
-        Localizer::Localizer() : scan_stamp(0.0), prev_scan_stamp(0.0), scan_dt(0.1), deskew_size(0), propagated_size(0),
-                                numProcessors(0), imu_stamp(0.0), prev_imu_stamp(0.0), imu_dt(0.005), first_imu_stamp(0.0),
-                                last_propagate_time_(-1.0), imu_calib_time_(3.0), gravity_(9.81), imu_calibrated_(false)
-                            { 
+        // NOTE: keep this list in declaration order (see Localizer.hpp) or GCC warns -Wreorder.
+        Localizer::Localizer() : scan_stamp(0.0), prev_scan_stamp(0.0), scan_dt(0.1),
+                                imu_stamp(0.0), prev_imu_stamp(0.0), imu_dt(0.005), first_imu_stamp(0.0),
+                                last_propagate_time_(-1.0), imu_calib_time_(3.0), gravity_(9.81),
+                                imu_calibrated_(false), numProcessors(0), deskew_size(0), propagated_size(0)
+                            {
 
             this->original_scan  = pcl::PointCloud<PointType>::ConstPtr (fast_limo::make_shared<pcl::PointCloud<PointType>>());
             this->deskewed_scan  = pcl::PointCloud<PointType>::ConstPtr (fast_limo::make_shared<pcl::PointCloud<PointType>>());
@@ -362,7 +364,7 @@
 
                 // pcl::transformPointCloud (*this->pc2match, *mapped_scan, this->state.get_RT()); // Not working for PCL 1.12
                 #pragma omp parallel for num_threads(this->num_threads_)
-                for(int i=0; i<pc2match->points.size(); i++){
+                for(size_t i=0; i<pc2match->points.size(); i++){
                     PointType pt = pc2match->points[i];
                     pt.getVector4fMap()[3] = 1.;
                     pt.getVector4fMap() = this->state.get_RT() * pt.getVector4fMap(); 
@@ -384,7 +386,7 @@
                     final_raw_scan->points.clear();
                     final_raw_scan->points.resize(deskewed_Xt2_pc_->points.size());
                     #pragma omp parallel for num_threads(this->num_threads_)
-                    for(int i=0; i<deskewed_Xt2_pc_->points.size(); i++){
+                    for(size_t i=0; i<deskewed_Xt2_pc_->points.size(); i++){
                         PointType pt = deskewed_Xt2_pc_->points[i];
                         pt.getVector4fMap()[3] = 1.;
                         pt.getVector4fMap() = this->state.get_RT() * pt.getVector4fMap(); 
@@ -825,7 +827,7 @@
             this->scan_stamp = extract_point_time(deskewed_scan_->points[deskewed_scan_->points.size()-1]) + offset;
 
             // IMU prior & deskewing 
-            States frames = this->integrateImu(this->prev_scan_stamp, this->scan_stamp, this->state); // baselink/body frames
+            States frames = this->integrateImu(this->prev_scan_stamp, this->scan_stamp); // baselink/body frames
 
             if(frames.size() < 1){
                 std::cout << "FAST_LIMO::ERROR: No frames obtained from IMU propagation!\n";
@@ -840,7 +842,7 @@
             this->last_state = fast_limo::State(this->_iKFoM.get_x()); // baselink/body frame
 
             #pragma omp parallel for num_threads(this->num_threads_)
-            for (int k = 0; k < deskewed_scan_->points.size(); k++) {
+            for (size_t k = 0; k < deskewed_scan_->points.size(); k++) {
 
                 int i_f = algorithms::binary_search_tailored(frames, extract_point_time(deskewed_scan_->points[k])+offset);
 
@@ -872,7 +874,7 @@
             return deskewed_Xt2_scan_; 
         }
 
-        States Localizer::integrateImu(double start_time, double end_time, State& state){
+        States Localizer::integrateImu(double start_time, double end_time){
 
             States imu_se3;
 
@@ -1020,7 +1022,6 @@
                 std::accumulate(this->lidar_rates.begin(), this->lidar_rates.end(), 0.0) / this->lidar_rates.size() : 0.0;
 
             // RAM Usage
-            double vm_usage = 0.0;
             double resident_set = 0.0;
             std::ifstream stat_stream("/proc/self/stat", std::ios_base::in); //get info from proc directory
             std::string pid, comm, state, ppid, pgrp, session, tty_nr;
@@ -1035,7 +1036,7 @@
                         >> num_threads >> itrealvalue >> starttime >> vsize >> rss; // don't care about the rest
             stat_stream.close();
             long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024; // for x86-64 is configured to use 2MB pages
-            vm_usage = vsize / 1024.0;
+            // `vsize` is still parsed above: it must be consumed positionally to reach `rss`.
             resident_set = rss * page_size_kb;
 
             // CPU Usage

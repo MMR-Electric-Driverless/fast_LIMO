@@ -39,7 +39,7 @@
         }
 
         bool fast_limo::Plane::enough_points(const MapPoints& pts){
-            return this->is_plane = pts.size() >= cfg_ptr->NUM_MATCH_POINTS;
+            return this->is_plane = pts.size() >= static_cast<size_t>(cfg_ptr->NUM_MATCH_POINTS);
         }
 
         bool fast_limo::Plane::close_enough(const std::vector<float>& dts){
@@ -105,7 +105,7 @@
         }
 
         bool fast_limo::Plane::plane_eval(const Eigen::Vector4f& n, const MapPoints& pts, const float& thres){
-            for (int j = 0; j < pts.size(); j++) {
+            for (size_t j = 0; j < pts.size(); j++) {
                 float res = n(0) * pts[j].x + n(1) * pts[j].y + n(2) * pts[j].z + n(3);
                 if (fabs(res) > thres) return false;
             }

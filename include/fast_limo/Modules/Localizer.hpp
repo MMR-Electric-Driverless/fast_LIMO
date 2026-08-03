@@ -187,7 +187,7 @@ class fast_limo::Localizer {
 
         pcl::PointCloud<PointType>::Ptr deskewPointCloud(pcl::PointCloud<PointType>::Ptr& pc, double& start_time);
 
-        States integrateImu(double start_time, double end_time, State& state);
+        States integrateImu(double start_time, double end_time);
 
         bool propagatedFromTimeRange(double start_time, double end_time,
                                   boost::circular_buffer<State>::reverse_iterator& begin_prop_it,

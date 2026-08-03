@@ -57,8 +57,8 @@ struct fast_limo::Config{
     struct iKFoM{
         struct Mapping{
             int NUM_MATCH_POINTS;   // num of points that constitute a match
-            int MAX_NUM_MATCHES;    // max num of matches (helps to reduce comp. load)
-            int MAX_NUM_PC2MATCH;   // max num of points to match (helps to reduce comp. load)
+            size_t MAX_NUM_MATCHES;    // max num of matches (helps to reduce comp. load)
+            size_t MAX_NUM_PC2MATCH;   // max num of points to match (helps to reduce comp. load)
             double MAX_DIST_PLANE;  // max distance between points to be considered a plane
             double PLANE_THRESHOLD; // threshold to consider an estimated plane is actually a plane (also used for deciding if point belongs to plane )
             struct Octree{

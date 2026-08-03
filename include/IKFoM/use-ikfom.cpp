@@ -5,7 +5,7 @@
 #include "fast_limo/Objects/State.hpp"
 #include "fast_limo/Objects/Plane.hpp"
 
-#include "use-ikfom.hpp"
+#include <use-ikfom.hpp>
 
 void IKFoM::h_share_model(state_ikfom &updated_state, esekfom::dyn_share_datastruct<double> &ekfom_data) {
 
@@ -73,7 +73,7 @@ Eigen::Matrix<double, 24, 23> IKFoM::df_dx(state_ikfom &s, const input_ikfom &in
 }
 
 
-Eigen::Matrix<double, 24, 12> IKFoM::df_dw(state_ikfom &s, const input_ikfom &in)
+Eigen::Matrix<double, 24, 12> IKFoM::df_dw(state_ikfom &s, [[maybe_unused]] const input_ikfom &in)
 {
 	Eigen::Matrix<double, 24, 12> cov = Eigen::Matrix<double, 24, 12>::Zero();
 	cov.template block<3, 3>(12, 3) = -s.rot.toRotationMatrix();

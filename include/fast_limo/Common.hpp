@@ -60,7 +60,9 @@ std::string to_string_with_precision(const T a_value, const int n = 6)
 }
 
 // FASTLIOv2
-#include "IKFoM/use-ikfom.hpp"
+// Angle brackets on purpose: resolves through the ikfom target's SYSTEM
+// include dir, which is what mutes the vendored toolkit's warnings.
+#include <use-ikfom.hpp>
 
 // Boost
 #include <boost/format.hpp>

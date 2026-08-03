@@ -151,20 +151,20 @@ struct Octree {
     {3, 5, 6, 1, 2, 4, 0}
   };
 
-  Octree() : bucket_size_(32), 
-             min_extent_(0.2f), 
-             downsample_(true),
-             root_(nullptr), 
-             num_points_(0) { }
+  Octree() : root_(nullptr),
+             num_points_(0),
+             bucket_size_(32),
+             min_extent_(0.2f),
+             downsample_(true) { }
 
 
-  Octree(size_t bucketSize_, 
-         bool downsample_, 
-         float minExtent_) : bucket_size_(bucketSize_), 
-                             min_extent_(minExtent_), 
-                             downsample_(downsample_),
-                             root_(nullptr), 
-                             num_points_(0) { }
+  Octree(size_t bucketSize_,
+         bool downsample_,
+         float minExtent_) : root_(nullptr),
+                             num_points_(0),
+                             bucket_size_(bucketSize_),
+                             min_extent_(minExtent_),
+                             downsample_(downsample_) { }
 
   ~Octree() {
     clear();

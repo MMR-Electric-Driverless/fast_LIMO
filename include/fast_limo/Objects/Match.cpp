@@ -22,7 +22,7 @@
 
         fast_limo::Match::Match(const Eigen::Vector3f& p_global, 
                                 const Eigen::Vector3f& p_local, 
-                                const fast_limo::Plane& H) : p_global(p_global), p_local(p_local), plane(H)
+                                const fast_limo::Plane& H) : plane(H), p_global(p_global), p_local(p_local)
         {
             this->dist = this->plane.dist2plane(p_global);
         }

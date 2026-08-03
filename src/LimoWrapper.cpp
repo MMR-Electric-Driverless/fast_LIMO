@@ -67,7 +67,7 @@ namespace ros2wrap {
 
                     // Declare the one and only Localizer and Mapper objects
                     fast_limo::Localizer& LOC = fast_limo::Localizer::getInstance();
-                    fast_limo::Mapper& MAP = fast_limo::Mapper::getInstance();
+                    [[maybe_unused]] fast_limo::Mapper& MAP = fast_limo::Mapper::getInstance();
 
                     // Load config
                     fast_limo::Config config;
@@ -644,8 +644,8 @@ namespace ros2wrap {
                 m.scale.y = 0.2;
                 m.scale.z = 0.2;
 
-                for(int i=0; i < matches.size(); i++){
-                    m.id = i;
+                for(size_t i=0; i < matches.size(); i++){
+                    m.id = static_cast<int>(i);
                     Eigen::Vector3f match_p = matches[i].get_global_point();
                     m.pose.position.x = match_p(0);
                     m.pose.position.y = match_p(1);

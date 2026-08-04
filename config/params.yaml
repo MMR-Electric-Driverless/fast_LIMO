@@ -2,11 +2,11 @@
 
 fast_limo:
   ros__parameters:
-    zero_copy: true
+    zero_copy: false
     topics:
       input:
         lidar: /lidar_points
-        imu: /lidar_imu
+        imu: /imu/data
       # output:
 
     frames: # output frames (the transform between frames will be broadcasted)
@@ -18,7 +18,7 @@ fast_limo:
 
     sensor_type: 2  # LiDAR type (0: OUSTER \ 1: VELODYNE \ 2: HESAI \ 3: LIVOX)
 
-    debug: true     # fill useful intermediate pcl (deskewed, final_raw...) for visualizing purposes
+    debug: false     # fill useful intermediate pcl (deskewed, final_raw...) for visualizing purposes
     verbose: true   # print debug/performance board
 
     estimate_extrinsics: false   # continuous estimation of LiDAR-IMU extrinsics 
@@ -85,10 +85,35 @@ fast_limo:
         NUM_MATCH_POINTS: 5           # num of points that constitute a match
         MAX_DIST_PLANE: 2.0           # [m] max distance between points of every match
         PLANES_THRESHOLD: 5.0e-2      # [m] threshold to consider if match points are part of a plane 
-        Octree: # incremental OcTree
+        # Map structure: octree | hashgrid
+        # Measured on-vehicle, 20 Hz Hesai, same route:
+        #             octree     hashgrid
+        #   scan      21.39 ms   13.88 ms   (1.54x)
+        #   match     10.68 ms    4.68 ms   (2.28x)
+        #   add        4.09 ms    0.26 ms   (15.7x)
+        #   cores       1.30       0.83
+        #   RAM       67.4 MB    53.2 MB
+        # A synthetic benchmark had the octree ahead; it batch-built the tree once
+        # via initialize() instead of inserting one scan per frame via update(),
+        # which is the octree's best case and not what this pipeline does.
+        backend: hashgrid
+
+        Octree: # incremental OcTree (backend: octree)
           bucket_size: 2      # maximum number of points allowed in an octant before it gets subdivided
           min_extent: 0.2     # minimum extent of the octant (used to stop subdividing)
           downsampling: true  # whether to downsample the octree
+
+        HashGrid: # iVox-style spatial hash (backend: hashgrid)
+          voxel_size: 1.5           # [m] side length of one voxel
+          max_points_per_voxel: 20  # points kept per voxel; also the downsampling policy (max 20)
+          neighbors: 27             # cells scanned per query: 7 (face-adjacent) or 27 (full 3x3x3)
+          # These are the measured-best settings, NOT arbitrary defaults. Map points
+          # sit ~leafSize (0.5 m) apart, so recall depends on voxel_size/spacing:
+          #   voxel 0.5 + 7 cells  -> recall 0.45 (only 24% of queries return 5 pts)
+          #   voxel 1.0 + 7 cells  -> recall 0.72
+          #   voxel 1.5 + 27 cells -> recall 1.00   <-- this
+          # 7 cells never reaches full recall at any voxel size: it omits the
+          # diagonal neighbours, where a fair share of the true 5-NN live.
 
       covariance:
         gyro: 0.01 

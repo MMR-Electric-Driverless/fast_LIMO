@@ -61,11 +61,17 @@ struct fast_limo::Config{
             size_t MAX_NUM_PC2MATCH;   // max num of points to match (helps to reduce comp. load)
             double MAX_DIST_PLANE;  // max distance between points to be considered a plane
             double PLANE_THRESHOLD; // threshold to consider an estimated plane is actually a plane (also used for deciding if point belongs to plane )
+            std::string backend;    // map structure to use: "octree" | "hashgrid"
             struct Octree{
                 int bucket_size;    //  maximum number of points allowed in an octant before it gets subdivided
                 float min_extent;   //  minimum extent of the octant (used to stop subdividing)
                 bool downsampling;  //  whether to downsample the octree
             } octree;
+            struct HashGrid{
+                float voxel_size;           //  [m] side length of one voxel
+                int max_points_per_voxel;   //  points kept per voxel (also the downsampling policy)
+                int neighbors;              //  cells scanned per query: 7 (face-adjacent) or 27
+            } hash_grid;
         } mapping;
 
         int MAX_NUM_ITERS;          // max num of iterations of the extended KF

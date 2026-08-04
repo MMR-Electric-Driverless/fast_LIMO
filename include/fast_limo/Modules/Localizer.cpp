@@ -261,6 +261,9 @@
                 return;
             }
 
+            this->stages = StageTimes(); // reset per-scan breakdown
+            std::unique_ptr<ScopedTimer> stage_timer(new ScopedTimer(this->stages.preprocess));
+
             // Remove NaNs
             std::vector<int> idx;
             raw_pc->is_dense = false;
@@ -306,13 +309,16 @@
             if(this->config.debug) // debug only
                 this->original_scan = fast_limo::make_shared<pcl::PointCloud<PointType>>(*input_pc); // LiDAR frame
 
+            stage_timer.reset(); // close out `preprocess`
+
             // Motion compensation
             pcl::PointCloud<PointType>::Ptr deskewed_Xt2_pc_ (fast_limo::make_shared<pcl::PointCloud<PointType>>());
             deskewed_Xt2_pc_ = this->deskewPointCloud(input_pc, time_stamp);
             /*NOTE: deskewed_Xt2_pc_ should be in base_link/body frame w.r.t last propagated state (Xt2) */
 
             // Voxel Grid Filter
-            if (this->config.filters.voxel_active) { 
+            if (this->config.filters.voxel_active) {
+                ScopedTimer t(this->stages.voxel);
                 pcl::PointCloud<PointType>::Ptr current_scan_
                     (fast_limo::make_shared<pcl::PointCloud<PointType>>(*deskewed_Xt2_pc_));
                 this->voxel_filter.setInputCloud(current_scan_);
@@ -321,6 +327,8 @@
             } else {
                 this->pc2match = deskewed_Xt2_pc_;
             }
+
+            this->stages.pc2match = this->pc2match->points.size();
 
             if(this->pc2match->points.size() > 1){
 
@@ -332,8 +340,11 @@
 
                     // Update iKFoM measurements (after prediction)
                 double solve_time = 0.0;
-                this->_iKFoM.update_iterated_dyn_share_modified(0.001 /*LiDAR noise*/, 5.0/*Degeneracy threshold*/, 
+                {
+                    ScopedTimer t(this->stages.kf);
+                    this->_iKFoM.update_iterated_dyn_share_modified(0.001 /*LiDAR noise*/, 5.0/*Degeneracy threshold*/,
                                                                 solve_time/*solving time elapsed*/, false/*print degeneracy values flag*/);
+                }
                     /*NOTE: update_iterated_dyn_share_modified() will trigger the matching procedure ( see "use-ikfom.cpp" )
                     in order to update the measurement stage of the KF with the computed point-to-plane distances*/
                 
@@ -363,15 +374,18 @@
                 mapped_scan->points.resize(pc2match->points.size());
 
                 // pcl::transformPointCloud (*this->pc2match, *mapped_scan, this->state.get_RT()); // Not working for PCL 1.12
+                {
+                ScopedTimer t(this->stages.transform);
                 #pragma omp parallel for num_threads(this->num_threads_)
                 for(size_t i=0; i<pc2match->points.size(); i++){
                     PointType pt = pc2match->points[i];
                     pt.getVector4fMap()[3] = 1.;
-                    pt.getVector4fMap() = this->state.get_RT() * pt.getVector4fMap(); 
+                    pt.getVector4fMap() = this->state.get_RT() * pt.getVector4fMap();
                     mapped_scan->points[i] = pt;
                     /*NOTE: pc2match must be in base_link frame w.r.t Xt2 frame for this transform to work.
                         mapped_scan is in world/global frame.
                     */
+                }
                 }
 
                 /*To DO:
@@ -396,7 +410,10 @@
                 }
 
                 // Add scan to map
-                map.add(mapped_scan, this->scan_stamp);
+                {
+                    ScopedTimer t(this->stages.map_add);
+                    map.add(mapped_scan, this->scan_stamp);
+                }
 
             }else
                 std::cout << "-------------- FAST_LIMO::NULL ITERATION --------------\n";
@@ -413,9 +430,16 @@
             }
             // if(calibrating < UCHAR_MAX) calibrating++;
 
-            // debug thread
-            this->debug_thread = std::thread( &Localizer::debugVerbose, this );
-            this->debug_thread.detach();
+            // Performance board. Runs inline and at ~1 Hz rather than on a detached
+            // thread per scan: 20 thread creations/s churned the scheduler for output
+            // no one can read at that rate, and the detached thread also raced against
+            // this one on the (non thread-safe) stat buffers it reads.
+            static double last_debug_stamp = 0.0;
+            if(this->scan_stamp < last_debug_stamp) last_debug_stamp = 0.0; // bag looped
+            if(this->scan_stamp - last_debug_stamp >= 1.0){
+                last_debug_stamp = this->scan_stamp;
+                this->debugVerbose();
+            }
 
             this->prev_scan_stamp = this->scan_stamp;
         }
@@ -761,41 +785,32 @@
             double sweep_ref_time = start_time;
             bool end_of_sweep = this->config.end_of_sweep;
 
-            // sort points by timestamp
-            std::function<bool(const PointType&, const PointType&)> point_time_cmp;
+            // Per-point absolute timestamp, by sensor type. Note this is a pure
+            // function of the point's own time field: it never looks at neighbours or
+            // indices, which is why the sweep does not need to be sorted (see below).
             std::function<double(PointType&)> extract_point_time;
 
             if (this->sensor == fast_limo::SensorType::OUSTER) {
 
-                point_time_cmp = [&end_of_sweep](const PointType& p1, const PointType& p2)
-                {   if (end_of_sweep) return p1.t > p2.t; 
-                    else return p1.t < p2.t; };
                 extract_point_time = [&sweep_ref_time, &end_of_sweep](PointType& pt)
-                {   if (end_of_sweep) return sweep_ref_time - pt.t * 1e-9f; 
+                {   if (end_of_sweep) return sweep_ref_time - pt.t * 1e-9f;
                     else return sweep_ref_time + pt.t * 1e-9f; };
 
             } else if (this->sensor == fast_limo::SensorType::VELODYNE) {
-                
-                point_time_cmp = [&end_of_sweep](const PointType& p1, const PointType& p2)
-                {   if (end_of_sweep) return p1.time > p2.time; 
-                    else return p1.time < p2.time; };
+
                 extract_point_time = [&sweep_ref_time, &end_of_sweep](PointType& pt)
-                {   if (end_of_sweep) return sweep_ref_time - pt.time; 
+                {   if (end_of_sweep) return sweep_ref_time - pt.time;
                     else return sweep_ref_time + pt.time; };
 
             } else if (this->sensor == fast_limo::SensorType::HESAI) {
 
-                point_time_cmp = [](const PointType& p1, const PointType& p2)
-                { return p1.timestamp < p2.timestamp; };
                 extract_point_time = [](PointType& pt)
                 { return pt.timestamp; };
 
             } else if (this->sensor == fast_limo::SensorType::LIVOX) {
-                
-                point_time_cmp = [](const PointType& p1, const PointType& p2)
-                { return p1.timestamp < p2.timestamp; };
+
                 extract_point_time = [&sweep_ref_time, &end_of_sweep](PointType& pt)
-                {   if (end_of_sweep) return sweep_ref_time - pt.timestamp * 1e-9f; 
+                {   if (end_of_sweep) return sweep_ref_time - pt.timestamp * 1e-9f;
                     else return sweep_ref_time + pt.timestamp * 1e-9f; };
             } else {
                 std::cout << "-------------------------------------------------------------------\n";
@@ -804,27 +819,46 @@
                 return fast_limo::make_shared<pcl::PointCloud<PointType>>();
             }
 
-            // copy points into deskewed_scan_ in order of timestamp
+            // Copy the sweep across and find its latest point time.
+            //
+            // This was a partial_sort_copy that ordered all ~20k points by timestamp,
+            // but nothing downstream consumes that order: the deskew loop below looks
+            // every point up independently through binary_search_tailored() over
+            // `frames` (the IMU state list, not the points), and the voxel grid
+            // reorders the cloud regardless. The sort's only product was its last
+            // element -- the maximum extracted time -- so a copy plus a max reduction
+            // is equivalent at O(n) instead of O(n log n) std::function comparisons.
             pcl::PointCloud<PointType>::Ptr deskewed_scan_ (fast_limo::make_shared<pcl::PointCloud<PointType>>());
             deskewed_scan_->points.resize(pc->points.size());
-            
-            std::partial_sort_copy(pc->points.begin(), pc->points.end(),
-                                    deskewed_scan_->points.begin(), deskewed_scan_->points.end(), point_time_cmp);
 
             if(deskewed_scan_->points.size() < 1){
-                std::cout << "FAST_LIMO::ERROR: failed to sort input pointcloud!\n";
+                std::cout << "FAST_LIMO::ERROR: input pointcloud is empty!\n";
                 return fast_limo::make_shared<pcl::PointCloud<PointType>>();
+            }
+
+            double max_point_time;
+            {
+            ScopedTimer t(this->stages.sweep_prep);
+
+            std::copy(pc->points.begin(), pc->points.end(), deskewed_scan_->points.begin());
+
+            max_point_time = -std::numeric_limits<double>::max();
+            #pragma omp parallel for reduction(max:max_point_time) num_threads(this->num_threads_)
+            for(size_t k = 0; k < deskewed_scan_->points.size(); k++){
+                double t_k = extract_point_time(deskewed_scan_->points[k]);
+                if(t_k > max_point_time) max_point_time = t_k;
+            }
             }
 
             // compute offset between sweep reference time and IMU data
             double offset = 0.0;
             if (config.time_offset) {
-                offset = this->imu_stamp - extract_point_time(deskewed_scan_->points[deskewed_scan_->points.size()-1]) - 1.e-4; // automatic sync (not precise!)
+                offset = this->imu_stamp - max_point_time - 1.e-4; // automatic sync (not precise!)
                 if(offset > 0.0) offset = 0.0; // don't jump into future
             }
 
             // Set scan_stamp for next iteration
-            this->scan_stamp = extract_point_time(deskewed_scan_->points[deskewed_scan_->points.size()-1]) + offset;
+            this->scan_stamp = max_point_time + offset;
 
             // IMU prior & deskewing 
             States frames = this->integrateImu(this->prev_scan_stamp, this->scan_stamp); // baselink/body frames
@@ -840,6 +874,8 @@
             deskewed_Xt2_scan_->points.resize(deskewed_scan_->points.size());
 
             this->last_state = fast_limo::State(this->_iKFoM.get_x()); // baselink/body frame
+
+            ScopedTimer deskew_timer(this->stages.deskew);
 
             #pragma omp parallel for num_threads(this->num_threads_)
             for (size_t k = 0; k < deskewed_scan_->points.size(); k++) {
@@ -1203,6 +1239,40 @@
             std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
                 << "Integrated states: " + std::to_string(this->propagated_size) << "|" << std::endl;
             std::cout << "|                                                                   |" << std::endl;
+
+            // Per-stage breakdown of the last scan. `match` and `jacobian` are summed
+            // over the KF's inner iterations and are a subset of `kf`.
+            {
+                const StageTimes& s = this->stages;
+                auto stage_line = [](const std::string& name, double ms, double total){
+                    std::ostringstream ss;
+                    ss << std::left << std::setw(22) << name << ":: "
+                       << std::right << std::fixed << std::setprecision(2) << std::setw(6) << ms << " ms  "
+                       << std::setw(5) << (total > 0.0 ? 100.0*ms/total : 0.0) << " %";
+                    std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
+                              << ss.str() << "|" << std::endl;
+                };
+
+                double total = s.preprocess + s.sweep_prep + s.deskew + s.voxel
+                             + s.kf + s.transform + s.map_add;
+
+                stage_line("Preprocess (filters)", s.preprocess, total);
+                stage_line("Sweep copy + max t",   s.sweep_prep, total);
+                stage_line("Deskew",              s.deskew,     total);
+                stage_line("Voxel grid",          s.voxel,      total);
+                stage_line("KF update (total)",   s.kf,         total);
+                stage_line("  - match (kNN)",     s.match,      total);
+                stage_line("  - jacobian",        s.jacobian,   total);
+                stage_line("Transform to world",  s.transform,  total);
+                stage_line("Octree add",          s.map_add,    total);
+
+                std::cout << "| " << std::left << std::setfill(' ') << std::setw(66)
+                    << "KF iterations: " + std::to_string(s.iterations)
+                       + "   |   pc2match: " + std::to_string(s.pc2match)
+                       + " / " + std::to_string(config.ikfom.mapping.MAX_NUM_PC2MATCH)
+                    << "|" << std::endl;
+                std::cout << "|                                                                   |" << std::endl;
+            }
 
             std::cout << std::right << std::setprecision(2) << std::fixed;
             std::cout << "| Computation Time :: "

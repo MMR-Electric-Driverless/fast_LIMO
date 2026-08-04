@@ -28,12 +28,51 @@
 
 using namespace fast_limo;
 
+namespace fast_limo {
+
+// Per-scan wall-clock breakdown of updatePointCloud(), in milliseconds. Written
+// only from the LiDAR callback (h_share_model runs on that same thread, inside
+// the iterated KF update), so no synchronisation is needed.
+struct StageTimes {
+    double preprocess = 0.0; // NaN removal + crop box + distance/FoV/rate filter
+    double sweep_prep  = 0.0; // sweep copy + latest-timestamp reduction
+    double deskew     = 0.0; // IMU prior + per-point motion compensation
+    double voxel      = 0.0; // voxel grid downsample
+    double kf         = 0.0; // whole iterated KF update (match + jacobian + solve)
+    double match      = 0.0; //   of which: kNN + plane fit, summed over iterations
+    double jacobian   = 0.0; //   of which: calculate_H, summed over iterations
+    double transform  = 0.0; // scan -> world frame
+    double map_add    = 0.0; // octree insertion
+
+    int    iterations = 0;   // KF matching passes actually executed this scan
+    size_t pc2match   = 0;   // points handed to the matcher (vs MAX_NUM_PC2MATCH)
+};
+
+// Adds its lifetime to `out`. Accumulates rather than assigns so that stages
+// entered once per KF iteration sum over the scan.
+struct ScopedTimer {
+    std::chrono::steady_clock::time_point t0;
+    double& out;
+
+    explicit ScopedTimer(double& o) : t0(std::chrono::steady_clock::now()), out(o) { }
+    ~ScopedTimer() {
+        out += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+    }
+};
+
+} // namespace fast_limo
+
 class fast_limo::Localizer {
 
     // VARIABLES
 
     public:
         pcl::PointCloud<PointType>::Ptr pc2match; // pointcloud to match in Xt2 (last_state) frame
+
+        // Public so h_share_model() can charge the matcher/Jacobian split to it,
+        // same as it already reaches pc2match directly.
+        StageTimes stages;
 
     private:
         // Iterated Kalman Filter on Manifolds (FASTLIOv2)
@@ -105,9 +144,6 @@ class fast_limo::Localizer {
 
         // Debugging
         unsigned char calibrating = 0;
-
-            // Threads
-        std::thread debug_thread;
 
             // Buffers
         boost::circular_buffer<double> cpu_times;

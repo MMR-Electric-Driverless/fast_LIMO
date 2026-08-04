@@ -20,14 +20,14 @@
 // class fast_limo::Plane
     // public
 
-        fast_limo::Plane::Plane(const MapPoints& pts, const std::vector<float>& dts, 
+        fast_limo::Plane::Plane(const Eigen::Vector3f* pts, const float* sq_dists, int n,
                                 Config::iKFoM::Mapping* config_ptr) : is_plane(false),
-                                                                 cfg_ptr(config_ptr) { 
-            if(not enough_points(pts)) return;
-            if(not close_enough(dts)) return;
+                                                                 cfg_ptr(config_ptr) {
+            if(not enough_points(n)) return;
+            if(not close_enough(sq_dists, n)) return;
 
             // Get normal vector of plane between p points
-            this->fit_plane(pts);
+            this->fit_plane(pts, n);
         }
 
         Eigen::Vector4f fast_limo::Plane::get_normal(){
@@ -38,13 +38,14 @@
             return this->is_plane;
         }
 
-        bool fast_limo::Plane::enough_points(const MapPoints& pts){
-            return this->is_plane = pts.size() >= static_cast<size_t>(cfg_ptr->NUM_MATCH_POINTS);
+        bool fast_limo::Plane::enough_points(int n){
+            return this->is_plane = n >= cfg_ptr->NUM_MATCH_POINTS;
         }
 
-        bool fast_limo::Plane::close_enough(const std::vector<float>& dts){
-            if(dts.size() < 1) return this->is_plane = false;
-            return this->is_plane = dts.back() < cfg_ptr->MAX_DIST_PLANE;
+        bool fast_limo::Plane::close_enough(const float* sq_dists, int n){
+            if(n < 1) return this->is_plane = false;
+            // sq_dists is sorted ascending, so the last entry is the farthest.
+            return this->is_plane = sq_dists[n-1] < cfg_ptr->MAX_DIST_PLANE;
         }
 
         float fast_limo::Plane::dist2plane(const Eigen::Vector3f& p) const {
@@ -67,55 +68,58 @@
     
     // private
 
-        void fast_limo::Plane::fit_plane(const MapPoints& pts){
+        void fast_limo::Plane::fit_plane(const Eigen::Vector3f* pts, int n){
             // Estimate plane
-            this->n_ABCD   = this->estimate_plane(pts);
-            this->is_plane = this->plane_eval(n_ABCD, pts, cfg_ptr->PLANE_THRESHOLD);
-
-            if(this->is_plane)
-                this->centroid = this->get_centroid(pts);
-            
-        }
-
-        Eigen::Vector4f fast_limo::Plane::estimate_plane(const MapPoints& pts){
-            int NUM_MATCH_POINTS = pts.size();
-            Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> A(NUM_MATCH_POINTS, 3);
-            Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> b(NUM_MATCH_POINTS, 1);
-            A.setZero();
-            b.setOnes();
-            b *= -1.0f;
-
-            for (int j = 0; j < NUM_MATCH_POINTS; j++)
-            {
-                A(j,0) = pts[j].x;
-                A(j,1) = pts[j].y;
-                A(j,2) = pts[j].z;
+            if(not this->estimate_plane(pts, n, this->n_ABCD)){
+                this->is_plane = false;
+                return;
             }
 
-            Eigen::Matrix<float, 3, 1> normvec = A.colPivHouseholderQr().solve(b);
-            Eigen::Vector4f pca_result;
-
-            float n = normvec.norm();
-            pca_result(0) = normvec(0) / n;
-            pca_result(1) = normvec(1) / n;
-            pca_result(2) = normvec(2) / n;
-            pca_result(3) = 1.0 / n;
-
-            return pca_result;
+            this->is_plane = this->plane_eval(n_ABCD, pts, n, cfg_ptr->PLANE_THRESHOLD);
         }
 
-        bool fast_limo::Plane::plane_eval(const Eigen::Vector4f& n, const MapPoints& pts, const float& thres){
-            for (size_t j = 0; j < pts.size(); j++) {
-                float res = n(0) * pts[j].x + n(1) * pts[j].y + n(2) * pts[j].z + n(3);
-                if (fabs(res) > thres) return false;
+        bool fast_limo::Plane::estimate_plane(const Eigen::Vector3f* pts, int n, Eigen::Vector4f& out){
+            // Least-squares fit of A*x = b with b = -1, i.e. the plane
+            // x(0)*px + x(1)*py + x(2)*pz + 1 = 0.
+            //
+            // Solved through the normal equations (A^T A) x = A^T b accumulated in
+            // place rather than a QR of a dynamically-sized A. Both are least-squares
+            // solutions of the same system, but A^T A is a fixed 3x3 that stays in
+            // registers, whereas the dynamic A, b and the QR's internals were four
+            // separate heap allocations per call.
+            Eigen::Matrix3f AtA = Eigen::Matrix3f::Zero();
+            Eigen::Vector3f Atb = Eigen::Vector3f::Zero();
+
+            for (int j = 0; j < n; j++) {
+                const Eigen::Vector3f& a = pts[j];
+                AtA.noalias() += a * a.transpose();
+                Atb -= a; // b(j) == -1
             }
+
+            Eigen::Vector3f normvec = AtA.ldlt().solve(Atb);
+
+            // Degenerate neighbourhoods (collinear or coincident map points) leave AtA
+            // singular, and the solve then yields inf/NaN. That must be rejected here:
+            // plane_eval() compares with `>`, which is false for NaN, so a NaN normal
+            // would otherwise be accepted as a perfect plane.
+            const float norm = normvec.norm();
+            if (not std::isfinite(norm) || norm < 1e-6f)
+                return false;
+
+            out(0) = normvec(0) / norm;
+            out(1) = normvec(1) / norm;
+            out(2) = normvec(2) / norm;
+            out(3) = 1.0f / norm;
 
             return true;
         }
 
-        Eigen::Vector3f fast_limo::Plane::get_centroid(const MapPoints& pts){
-            int N = pts.size();
-            Eigen::Vector3f centroid_vect;
-            for (MapPoint p : pts) centroid_vect += p.getVector3fMap();
-            return centroid_vect/static_cast<float>(N);
+        bool fast_limo::Plane::plane_eval(const Eigen::Vector4f& n, const Eigen::Vector3f* pts,
+                                          int num, const float& thres){
+            for (int j = 0; j < num; j++) {
+                float res = n(0) * pts[j].x() + n(1) * pts[j].y() + n(2) * pts[j].z() + n(3);
+                if (fabs(res) > thres) return false;
+            }
+
+            return true;
         }

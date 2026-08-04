@@ -384,13 +384,35 @@ namespace ros2wrap {
                 rclcpp::Parameter plane_thr_p = this->get_parameter("iKFoM.Mapping.PLANES_THRESHOLD");
                 config->ikfom.mapping.PLANE_THRESHOLD = plane_thr_p.as_double();
 
-                // iOcTree 
+                // iOcTree
                 rclcpp::Parameter bucket_size = this->get_parameter("iKFoM.Mapping.Octree.bucket_size");
                 config->ikfom.mapping.octree.bucket_size = bucket_size.as_int();
                 rclcpp::Parameter min_extent = this->get_parameter("iKFoM.Mapping.Octree.min_extent");
                 config->ikfom.mapping.octree.min_extent = static_cast<float>(min_extent.as_double());
                 rclcpp::Parameter downsampling = this->get_parameter("iKFoM.Mapping.Octree.downsampling");
                 config->ikfom.mapping.octree.downsampling = downsampling.as_bool();
+
+                /* Map backend selection + hash grid settings.
+                   Read defensively (has_parameter) so a config predating the hashgrid
+                   backend still launches on the octree exactly as it did before. */
+                config->ikfom.mapping.backend = "octree";
+                if(this->has_parameter("iKFoM.Mapping.backend"))
+                    config->ikfom.mapping.backend = this->get_parameter("iKFoM.Mapping.backend").as_string();
+
+                config->ikfom.mapping.hash_grid.voxel_size = 0.5f;
+                if(this->has_parameter("iKFoM.Mapping.HashGrid.voxel_size"))
+                    config->ikfom.mapping.hash_grid.voxel_size =
+                        static_cast<float>(this->get_parameter("iKFoM.Mapping.HashGrid.voxel_size").as_double());
+
+                config->ikfom.mapping.hash_grid.max_points_per_voxel = 20;
+                if(this->has_parameter("iKFoM.Mapping.HashGrid.max_points_per_voxel"))
+                    config->ikfom.mapping.hash_grid.max_points_per_voxel =
+                        this->get_parameter("iKFoM.Mapping.HashGrid.max_points_per_voxel").as_int();
+
+                config->ikfom.mapping.hash_grid.neighbors = 7;
+                if(this->has_parameter("iKFoM.Mapping.HashGrid.neighbors"))
+                    config->ikfom.mapping.hash_grid.neighbors =
+                        this->get_parameter("iKFoM.Mapping.HashGrid.neighbors").as_int();
 
                 // Covariance
                 rclcpp::Parameter gyro_p = this->get_parameter("iKFoM.covariance.gyro");
@@ -667,7 +689,12 @@ int main(int argc, char * argv[])
 
     rclcpp::Node::SharedPtr limo = std::make_shared<ros2wrap::LimoWrapper>();
 
-    rclcpp::executors::MultiThreadedExecutor executor; // by default using all available cores
+    // Two threads, not one per core: the node has exactly two MutuallyExclusive
+    // callback groups (LiDAR and IMU), so at most two callbacks can ever run at
+    // once. Any extra executor thread can never pick up work -- it only wakes,
+    // contends for the executor mutex and migrates, stealing cores from the
+    // OpenMP regions inside the LiDAR callback.
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
     executor.add_node(limo);
     executor.spin();
 

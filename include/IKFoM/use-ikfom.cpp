@@ -12,22 +12,34 @@ void IKFoM::h_share_model(state_ikfom &updated_state, esekfom::dyn_share_datastr
 	fast_limo::Localizer& LOC = fast_limo::Localizer::getInstance();
 	fast_limo::Mapper& MAP = fast_limo::Mapper::getInstance();
 
+	// This runs once per iteration of the KF's inner loop, on the LiDAR thread.
+	// Charge each half separately so the performance board can separate the
+	// kNN/plane-fit cost from the Jacobian assembly.
+	LOC.stages.iterations++;
+
 	// Calculate matches
-	Matches matches = MAP.match(
-	    fast_limo::State (updated_state),
-	    LOC.pc2match
-	);
+	Matches matches;
+	{
+		fast_limo::ScopedTimer t(LOC.stages.match);
+		matches = MAP.match(
+		    fast_limo::State (updated_state),
+		    LOC.pc2match
+		);
+	}
 
 	// // Calculate derivatives
-	LOC.calculate_H(
-	    // Inputs
-	    updated_state,
-	    matches,
+	{
+		fast_limo::ScopedTimer t(LOC.stages.jacobian);
+		LOC.calculate_H(
+		    // Inputs
+		    updated_state,
+		    matches,
 
-	    // Outputs
-	    ekfom_data.h_x,
-	    ekfom_data.h
-	);
+		    // Outputs
+		    ekfom_data.h_x,
+		    ekfom_data.h
+		);
+	}
 }
 
 MTK::get_cov<process_noise_ikfom>::type process_noise_cov()

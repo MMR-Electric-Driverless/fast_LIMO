@@ -34,6 +34,8 @@
 #include <functional>
 #include <Eigen/Dense>
 
+#include "fast_limo/Objects/MapTypes.hpp"
+
 namespace fast_limo {
 
 namespace octree {
@@ -41,50 +43,10 @@ namespace octree {
 using Point  = Eigen::Vector3f;
 using Points = std::vector<Point, Eigen::aligned_allocator<Point>>;
 
-struct Heap {
-  struct DistancePoint {
-    float dist;
-    Point point;
-
-    DistancePoint() : dist(std::numeric_limits<float>::max()) { }
-  };
-
-  size_t capacity;
-  size_t count;
-  float worst_distance_;
-  std::vector<DistancePoint> data;
-
-  Heap(size_t capacity_) : capacity(capacity_), count(0), data(capacity_) { }
-
-  bool full() const {
-    return count == capacity;
-  }
-
-  std::vector<DistancePoint> get_data() {
-    return std::vector<DistancePoint>(data.begin(), data.begin()+count);
-  }
-
-  float worstDist() {
-    return full() ? data[count-1].dist : std::numeric_limits<float>::max();
-  }
-
-  void addPoint(const Point& p, float dist) {
-    if (full() and dist >= data[count-1].dist)
-      return;
-
-    if (count < capacity)
-      ++count;
-
-    int i = static_cast<int>(count) - 1;
-    while (i > 0 && data[i - 1].dist > dist) {
-      data[i] = data[i - 1];
-      --i;
-    }
-
-    data[i].dist = dist;
-    data[i].point = p;
-  }
-};
+// The bounded search collector and its result type are shared with every other
+// map backend (see MapTypes.hpp), so an octree-vs-hashgrid A/B compares the
+// structures and not two different notions of "the k nearest".
+using Heap = fast_limo::KnnHeap;
 
 
 /*
@@ -522,35 +484,20 @@ struct Octree {
   }
 
 
-  template <typename PointT>
-  void knn(const PointT& query, 
-           int k, 
-           std::vector<PointT> &neighbors, 
-           std::vector<float> &distances) {
-    
-    if (root_ == nullptr)
+  void knn(const Point& query, int k, fast_limo::KnnResult& result) {
+
+    result.count = 0;
+
+    // k < 1 would make the heap report itself full while empty, and worstDist()
+    // would then index dists[-1].
+    if (root_ == nullptr || k < 1)
       return;
-    
-    neighbors.clear();
-    distances.clear();
-      
-    Heap heap(k);
-    Point q = Point(query.x, query.y, query.z);
+
+    Heap heap(static_cast<size_t>(k));
+    Point q = query;
     knn(root_, q, heap);
-    
-    std::vector<Heap::DistancePoint> points = heap.get_data();
 
-    neighbors.reserve(points.size());
-    distances.reserve(points.size());
-
-    for (auto& p_dist : points) {
-      PointT pt;
-      pt.x = p_dist.point.x();
-      pt.y = p_dist.point.y();
-      pt.z = p_dist.point.z();
-      neighbors.push_back(pt);
-      distances.push_back(p_dist.dist);
-    }
+    heap.fill(result);
   }
 
 

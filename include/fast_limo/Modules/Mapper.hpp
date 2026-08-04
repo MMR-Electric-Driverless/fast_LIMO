@@ -19,7 +19,7 @@
 #define __FASTLIMO_MAPPER_HPP__
 
 #include "fast_limo/Common.hpp"
-#include "fast_limo/Objects/Octree.hpp"
+#include "fast_limo/Objects/MapBackend.hpp"
 #include "fast_limo/Objects/Match.hpp"
 #include "fast_limo/Objects/State.hpp"
 #include "fast_limo/Objects/Plane.hpp"
@@ -32,7 +32,7 @@ class fast_limo::Mapper {
     // Variables
 
     private:
-        octree::Octree octree_;
+        std::unique_ptr<IMapBackend> backend_;
 
         Config::iKFoM::Mapping config;
 

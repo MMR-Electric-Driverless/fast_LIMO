@@ -25,7 +25,11 @@ class fast_limo::Plane{
 
     public:
 
-        Plane(const MapPoints& p, const std::vector<float>& d, 
+        // `pts`/`sq_dists` are the n nearest map points and their squared
+        // distances, sorted ascending. Taken as raw pointers so the caller can
+        // pass stack buffers: this is built once per kNN query (~30k per scan),
+        // so no allocation may happen along this path.
+        Plane(const Eigen::Vector3f* pts, const float* sq_dists, int n,
               Config::iKFoM::Mapping* config_ptr);
         Plane() = default;
 
@@ -38,23 +42,20 @@ class fast_limo::Plane{
         bool on_plane(const Eigen::Vector3f&);
         bool on_plane(const PointType&);
         
-        bool enough_points(const MapPoints& p);
-        bool close_enough(const std::vector<float>& d);
+        bool enough_points(int n);
+        bool close_enough(const float* sq_dists, int n);
 
     private:
-        Eigen::Vector3f centroid;
         Eigen::Vector4f n_ABCD; // plane normal vector
         bool is_plane;
 
         Config::iKFoM::Mapping* cfg_ptr;
 
-        void fit_plane(const MapPoints&);
+        void fit_plane(const Eigen::Vector3f* pts, int n);
 
-        Eigen::Vector4f estimate_plane(const MapPoints&);
+        bool estimate_plane(const Eigen::Vector3f* pts, int n, Eigen::Vector4f& out);
 
-        bool plane_eval(const Eigen::Vector4f&, const MapPoints&, const float&);
-
-        Eigen::Vector3f get_centroid(const MapPoints&);
+        bool plane_eval(const Eigen::Vector4f&, const Eigen::Vector3f* pts, int n, const float&);
 
 };
 

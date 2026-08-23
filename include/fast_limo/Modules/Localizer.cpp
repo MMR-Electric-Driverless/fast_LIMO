@@ -853,8 +853,30 @@
             // compute offset between sweep reference time and IMU data
             double offset = 0.0;
             if (config.time_offset) {
-                offset = this->imu_stamp - max_point_time - 1.e-4; // automatic sync (not precise!)
-                if(offset > 0.0) offset = 0.0; // don't jump into future
+                double raw = this->imu_stamp - max_point_time - 1.e-4; // automatic sync (not precise!)
+                if(raw > 0.0) raw = 0.0; // don't jump into future
+
+                if (config.time_offset_tau > 0.0) {
+                    /* Low-pass the offset instead of taking the raw per-sweep
+                       value (see time_offset_lp_ in the header). alpha is the
+                       per-sweep weight for a tau-second time constant at the
+                       measured sweep interval; dt comes from the sweep stamps
+                       themselves, so a dropped sweep is weighted like the
+                       interval it actually spans rather than like one. */
+                    if (!this->time_offset_init_) {
+                        this->time_offset_lp_ = raw;
+                        this->time_offset_init_ = true;
+                    } else {
+                        double dt = max_point_time - this->prev_scan_stamp;
+                        if (!(dt > 0.0) || dt > 1.0) dt = 0.05; // first sweep / a gap: fall back to the nominal 20 Hz
+                        const double alpha = dt / (config.time_offset_tau + dt);
+                        this->time_offset_lp_ += alpha * (raw - this->time_offset_lp_);
+                    }
+                    offset = this->time_offset_lp_;
+                    if(offset > 0.0) offset = 0.0; // the clamp still holds on the filtered value
+                } else {
+                    offset = raw; // legacy: re-derive from scratch every sweep
+                }
             }
 
             // Set scan_stamp for next iteration

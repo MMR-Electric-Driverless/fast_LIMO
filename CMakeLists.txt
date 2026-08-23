@@ -50,6 +50,26 @@ find_package(pcl_conversions REQUIRED)
 #=======================================
 # Zero Copy support
 #=======================================
+# Per-frame latency instrumentation: one mmr_base/LatencySample per processed
+# sweep on /latency/sample/fast_limo. Needs mmr_base for exactly the same reason
+# ENABLE_ZERO_COPY does, which is why it is env-var driven in the same way --
+# `LATENCY_TESTING=1 colcon build` instruments the whole stack at once.
+option(LATENCY_TESTING "Publish per-frame latency samples on /latency/sample/<key>" OFF)
+if($ENV{LATENCY_TESTING})
+  set(LATENCY_TESTING ON)
+endif()
+if(LATENCY_TESTING)
+  find_package(mmr_base QUIET)
+  if(NOT mmr_base_FOUND)
+    message(FATAL_ERROR
+      "LATENCY_TESTING requires mmr_base (for msg/LatencySample) and it was not found")
+  endif()
+  message(STATUS "Latency testing: ENABLED -- samples on /latency/sample/fast_limo")
+  add_definitions(-DLATENCY_TESTING)
+else()
+  message(STATUS "Latency testing: DISABLED")
+endif()
+
 option(ENABLE_ZERO_COPY "Enable Zero Copy for ROS2 low latency comunication" OFF)
 
 if($ENV{RMW_FASTRTPS_USE_QOS_FROM_XML})
@@ -76,6 +96,51 @@ else()
   message(
     "============================================================\n"
     "-- ZERO COPY is DISABLED - PLEASE SET ENV RMW_FASTRTPS_USE_QOS_FROM_XML=1 BEFORE BUILDING TO USE ZERO COPY\n"
+    "============================================================\n"
+  )
+endif()
+
+#=======================================
+# BARQ support
+#=======================================
+# Third transport, alongside plain ROS2 and Fast DDS zero copy. Env-var driven
+# in the same way as ENABLE_ZERO_COPY and LATENCY_TESTING so one
+# `ENABLE_BARQ=1 colcon build` instruments the whole stack at once, and matching
+# how cuda_cone_rush -- the other BARQ reader on the same segment -- is built.
+option(ENABLE_BARQ "Enable BARQ shared-memory transport for the input pointcloud" OFF)
+if($ENV{ENABLE_BARQ})
+  set(ENABLE_BARQ ON)
+endif()
+
+if(ENABLE_BARQ)
+  find_package(barq QUIET)
+  if(NOT barq_FOUND)
+    # FATAL, unlike the zero copy block above, which quietly degrades when
+    # mmr_base is missing. Asking for BARQ and silently getting a ROS2 build is
+    # the exact failure that made a whole transport A/B measure the wrong arm.
+    message(FATAL_ERROR
+      "============================================================\n"
+      "ENABLE_BARQ is ON, but the BARQ package was not found.\n"
+      "This package is not available on rosdep or apt.\n"
+      "You must clone and build it manually from:\n"
+      "    cd ~/ros2_ws/src\n"
+      "    git clone https://github.com/leonardonels/barq.git\n"
+      "    cd ~/ros2_ws && colcon build\n"
+      "Then rebuild this package with:\n"
+      "    cd ~/ros2_ws && ENABLE_BARQ=1 colcon build --packages-up-to fast_limo --cmake-args -DCMAKE_BUILD_TYPE=Release\n"
+      "============================================================\n"
+    )
+  endif()
+  message(
+    "============================================================\n"
+    "-- BARQ is ENABLED\n"
+    "============================================================\n"
+  )
+  add_definitions(-DENABLE_BARQ)
+else()
+  message(
+    "============================================================\n"
+    "-- BARQ is DISABLED - PLEASE SET ENV ENABLE_BARQ=1 BEFORE BUILDING TO USE BARQ\n"
     "============================================================\n"
   )
 endif()
@@ -134,6 +199,10 @@ set(NODE_DEPENDENCIES
 
 if(mmr_base_FOUND)
   list(APPEND NODE_DEPENDENCIES "mmr_base")
+endif()
+
+if(barq_FOUND)
+  list(APPEND NODE_DEPENDENCIES "barq")
 endif()
 
 ament_target_dependencies(${PROJECT_NAME}_multi_exec ${NODE_DEPENDENCIES})

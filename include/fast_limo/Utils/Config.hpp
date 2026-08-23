@@ -88,6 +88,7 @@ struct fast_limo::Config{
     bool calibrate_accel;       // whether to estimate linear accel. bias
     bool calibrate_gyro;        // whether to estimate ang. velocity bias
     bool time_offset;           // whether to take into account the time offset
+    double time_offset_tau;     // [s] low-pass time constant for that offset. 0 = re-derive it from scratch every sweep (legacy). See Localizer::time_offset_lp_.
     bool end_of_sweep;          // whether the sweep reference time is w.r.t. the start or the end of the scan (only applies to VELODYNE/OUSTER)
 
     bool debug;         // whether to copy intermediate point clouds into aux variables (for visualization)

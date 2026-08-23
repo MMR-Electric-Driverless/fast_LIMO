@@ -3,6 +3,26 @@
 fast_limo:
   ros__parameters:
     zero_copy: false
+
+    # ================ BARQ options =================
+    # Shared-memory transport (github.com/leonardonels/barq), written by the Hesai
+    # driver when its own BARQ_enable is true. Needs a build with ENABLE_BARQ=1.
+    # Mutually exclusive with zero_copy -- setting both is refused at startup, not
+    # silently resolved, because a transport A/B whose two arms are secretly the
+    # same arm is worse than one that does not start.
+    BARQ_enabled: false
+    BARQ_topic: /lidar_points     # segment name; must equal the driver's BARQ_topic
+    BARQ_retry_delay_ms: 100
+    # x100 ms = 10 s. The driver is the only process that creates the segment and
+    # it is usually started last, so this has to cover the stack's warmup. There is
+    # no ROS2 fallback when it runs out: the node exits instead of quietly becoming
+    # a ROS2 run under a barq label.
+    BARQ_max_retries: 100
+    # BARQ has no wake-up (its futex path is still a TODO), so the frame is found by
+    # looking. This is the poll period, and half of it is the average delivery delay
+    # this arm pays on top of the transport itself.
+    BARQ_polling_rate_ms: 1.0
+    BARQ_writer_timeout_ms: 1000  # heartbeat older than this -> drop and re-attach
     topics:
       input:
         lidar: /lidar_points

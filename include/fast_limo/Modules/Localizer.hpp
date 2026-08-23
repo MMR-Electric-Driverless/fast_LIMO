@@ -95,7 +95,7 @@ class fast_limo::Localizer {
         pcl::VoxelGrid<PointType> voxel_filter;
 
         // Point Clouds
-        pcl::PointCloud<PointType>::ConstPtr original_scan; // in base_link/body frame
+        pcl::PointCloud<PointType>::ConstPtr original_scan; // in LiDAR frame (untransformed input)
         pcl::PointCloud<PointType>::ConstPtr deskewed_scan; // in global/world frame
         pcl::PointCloud<PointType>::Ptr final_raw_scan;     // in global/world frame
         pcl::PointCloud<PointType>::Ptr final_scan;         // in global/world frame
@@ -106,6 +106,29 @@ class fast_limo::Localizer {
         double scan_dt;
 
         double imu_stamp;
+
+        /* ---- lidar<->IMU time offset, LOW-PASSED ---------------------------
+           The offset used to be re-derived from scratch on every sweep as
+             offset = imu_stamp - max_point_time - 1e-4
+           where imu_stamp is simply whichever IMU sample last reached the
+           callback. That discards the true lidar<->IMU temporal relationship
+           and replaces it with ARRIVAL ORDER.
+
+           It is benign when one player emits both streams (a bag): arrival
+           order IS the recorded order. It is NOT benign when the two streams
+           come from independent replayers (a pcap replayed by the Hesai SDK
+           alongside an IMU replayed by rosbag2, i.e. as_demo's sensor mode) or
+           from two real drivers scheduled independently: there, arrival order
+           is a scheduling artefact, so a sweep gets placed on the IMU timeline
+           where it does not belong.
+
+           So: track the offset, do not re-derive it. The low-pass keeps the
+           slow epoch drift (which is real and must be followed) and rejects the
+           per-sweep arrival noise (which is not), leaving genuine relative
+           lidar timing to carry through as it does with a single player.
+           time_offset_tau = 0 restores the legacy per-sweep behaviour. */
+        double time_offset_lp_ = 0.0;
+        bool   time_offset_init_ = false;
         double prev_imu_stamp;
         double imu_dt;
         double first_imu_stamp;

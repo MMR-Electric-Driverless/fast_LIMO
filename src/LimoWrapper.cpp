@@ -17,6 +17,11 @@
 
 #include "ROSutils.hpp"
 
+#ifdef LATENCY_TESTING
+#include <chrono>
+#include <mmr_base/msg/latency_sample.hpp>
+#endif
+
 namespace ros2wrap {
 
     class LimoWrapper : public rclcpp::Node
@@ -27,10 +32,12 @@ namespace ros2wrap {
         public:
             std::string world_frame;
             std::string body_frame;
+            std::string lidar_frame;
 
             bool debug;
             bool publish_tf;
             bool zero_copy;
+            bool barq;
 
         private:
                 // subscribers
@@ -40,9 +47,41 @@ namespace ros2wrap {
             #endif
             rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr              imu_sub_;
 
+                /* Held as a member because the BARQ transport has no subscription
+                   to carry it: the poll timer and the writer health check go into
+                   the SAME MutuallyExclusive group the lidar subscription would
+                   have used, so a frame being processed cannot be re-entered by
+                   the next poll and the two-thread executor in main() still has
+                   exactly one runnable callback per group. */
+            rclcpp::CallbackGroup::SharedPtr lidar_cbg_;
+
+            #ifdef ENABLE_BARQ
+                // BARQ transport
+            std::unique_ptr<BARQ::Reader> barq_reader_;
+            rclcpp::TimerBase::SharedPtr  barq_poll_timer_;
+            rclcpp::TimerBase::SharedPtr  barq_health_timer_;
+            rclcpp::TimerBase::SharedPtr  barq_connect_timer_;
+            std::string barq_topic_             = "/lidar_points";
+            size_t      barq_max_size_          = 0;
+            int         barq_retry_delay_ms_    = 100;
+            int         barq_max_retries_       = 100;   // x100 ms = 10 s, see loadBarqConfig
+            double      barq_polling_rate_ms_   = 1.0;
+            int         barq_writer_timeout_ms_ = 1000;
+            int         barq_retries_           = 0;
+            #endif
+
                 // main publishers
             rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pc_pub;
             rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr       state_pub;
+#ifdef LATENCY_TESTING
+            rclcpp::Publisher<mmr_base::msg::LatencySample>::SharedPtr   latency_sample_pub_;
+            uint32_t latency_seq_ = 0;
+            int64_t  latency_t_in_ = 0;
+            static int64_t latencyMonotonicNs() {
+                return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            }
+#endif
 
                 // debug publishers
             rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr orig_pub;
@@ -82,9 +121,30 @@ namespace ros2wrap {
                     rclcpp::Parameter zero_copy_p = this->get_parameter("zero_copy");
                     this->zero_copy = zero_copy_p.as_bool();
 
+                    /* Third transport. Optional key, so a params file predating it
+                       still starts on ROS2 -- get_parameter would throw here, since
+                       the node declares from overrides only (see loadConfig). */
+                    this->barq = this->has_parameter("BARQ_enabled")
+                            ? this->get_parameter("BARQ_enabled").as_bool() : false;
+
+                    /* REFUSED, not silently resolved in favour of one of them.
+                       These are two different transports for the same cloud and
+                       picking one behind the operator's back is precisely how an
+                       A/B ends up with two arms that were secretly the same arm. */
+                    if(this->barq && this->zero_copy){
+                        RCLCPP_ERROR_STREAM(this->get_logger(), "\n-------------------------------------------------------------------\n"
+                                            << "FAST_LIMO::FATAL ERROR: BARQ_enabled and zero_copy are BOTH true.\n"
+                                            << "          They are alternative transports for the same input cloud;\n"
+                                            << "          enable exactly one (or neither, for plain ROS2).\n"
+                                            << "-------------------------------------------------------------------\n"
+                                            );
+                        throw std::runtime_error("FAST_LIMO::FATAL ERROR: BARQ_enabled and zero_copy are mutually exclusive\n\n");
+                    }
+
                     // Define two callback groups (ensure parallel execution of lidar_callback & imu_callback)
                     rclcpp::SubscriptionOptions lidar_opt, imu_opt;
-                    lidar_opt.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+                    this->lidar_cbg_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+                    lidar_opt.callback_group = this->lidar_cbg_;
                     imu_opt.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
                     // Set up subscribers
@@ -92,7 +152,21 @@ namespace ros2wrap {
                     // depth is already 5 from the profile, override if needed:
                     // qos.keep_last(10);
 
-                    if(this->zero_copy){    // zero copy just on lidar for now
+                    if(this->barq){         // BARQ, like zero copy, is lidar-only
+                    #ifdef ENABLE_BARQ
+                        this->loadBarqConfig(config.topics.lidar);
+                        this->barqReaderInit();
+                    #else
+                        RCLCPP_ERROR_STREAM(this->get_logger(), "\n-------------------------------------------------------------------\n"
+                                            << "FAST_LIMO::FATAL ERROR: BARQ_enabled is true but fast_limo was built WITHOUT BARQ support!\n"
+                                            << "          Rebuild with ENABLE_BARQ=1 (or -DENABLE_BARQ=ON) and the barq package\n"
+                                            << "          available, or set BARQ_enabled to false in the config file.\n"
+                                            << "-------------------------------------------------------------------\n"
+                                            );
+                        throw std::runtime_error("FAST_LIMO::FATAL ERROR: BARQ support not compiled in\n\n");
+                    #endif
+                    }
+                    else if(this->zero_copy){    // zero copy just on lidar for now
                     #ifdef ENABLE_ZERO_COPY
                         bounded_lidar_sub_ = this->create_subscription<mmr_base::msg::BoundedPointcloud>(
                                     config.topics.lidar, qos, std::bind(&LimoWrapper::boundedpointcloud_callback, this, std::placeholders::_1), lidar_opt);
@@ -116,6 +190,12 @@ namespace ros2wrap {
                     // Set up publishers
                     pc_pub      = this->create_publisher<sensor_msgs::msg::PointCloud2>("/fast_limo/pointcloud", 1);
                     state_pub   = this->create_publisher<nav_msgs::msg::Odometry>("/fast_limo/state", 1);
+#ifdef LATENCY_TESTING
+                    latency_sample_pub_ = this->create_publisher<mmr_base::msg::LatencySample>(
+                        "/latency/sample/fast_limo", rclcpp::QoS(rclcpp::KeepLast(100)).reliable());
+                    RCLCPP_INFO(this->get_logger(),
+                        "LATENCY_TESTING: per-frame samples on /latency/sample/fast_limo");
+#endif
 
                     if(this->debug)
                     {
@@ -175,6 +255,12 @@ namespace ros2wrap {
             /* Zero copy entry point: the BoundedPointcloud layout is known at compile time,
                so the payload is unpacked by hand (no PointField metadata is transmitted). */
             void boundedpointcloud_callback(const mmr_base::msg::BoundedPointcloud & msg) {
+#ifdef LATENCY_TESTING
+                /* First statement: after the middleware delivered, before this
+                   node touches the payload. fromROStoLimo below is this node's
+                   work and belongs in compute, not in delivery. */
+                this->latency_t_in_ = latencyMonotonicNs();
+#endif
 
                 fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
                 static bool pc_in_good_shape = this->checkPointcloudStructure(loc.get_sensor_type());
@@ -192,6 +278,10 @@ namespace ros2wrap {
 
             /* Standard entry point */
             void pointcloud_callback(const sensor_msgs::msg::PointCloud2 & msg) {
+#ifdef LATENCY_TESTING
+                // See boundedpointcloud_callback.
+                this->latency_t_in_ = latencyMonotonicNs();
+#endif
 
                 fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
                 static bool pc_in_good_shape = this->checkPointcloudStructure(msg, loc.get_sensor_type());
@@ -206,12 +296,239 @@ namespace ros2wrap {
                 this->lidar_callback(pc_, rclcpp::Time(msg.header.stamp).seconds());
             }
 
+            #ifdef ENABLE_BARQ
+            /* ================================ BARQ ================================
+               Third input path, and the only one that is not delivered to us: BARQ
+               is a single-writer double-buffer in shared memory with no notification
+               mechanism (the futex wake is still a TODO in its README), so the frame
+               arrives when a timer goes looking for it.
+
+               Wire layout, fixed at compile time on both ends:
+
+                 struct BARQFrameHeader { uint32 width; uint32 height;
+                                          uint32 point_step; double timestamp; }  // 20 B
+                 struct BARQPoint       { float x, y, z, intensity;
+                                          uint16 ring; double timestamp; }        // 26 B
+
+               Byte-for-byte the same per-point layout as mmr_base/BoundedPointcloud,
+               so fromBARQtoLimo below is fromROStoLimo(BoundedPointcloud) with a
+               different pointer source -- see the offsets in both.               */
+
+            void loadBarqConfig(const std::string& fallback_topic){
+                /* Optional keys, read the same guarded way as the rest of this
+                   node's config: parameters exist only if the YAML supplies them
+                   (automatically_declare_parameters_from_overrides), and
+                   declare_parameter here would throw AlreadyDeclared. */
+                auto get_str = [&](const char* k, const std::string& d){
+                    return this->has_parameter(k) ? this->get_parameter(k).as_string() : d; };
+                auto get_int = [&](const char* k, int d){
+                    return this->has_parameter(k) ? static_cast<int>(this->get_parameter(k).as_int()) : d; };
+                auto get_dbl = [&](const char* k, double d){
+                    return this->has_parameter(k) ? this->get_parameter(k).as_double() : d; };
+
+                /* Defaults to the ROS topic name, because the Hesai driver names the
+                   shared-memory segment after it (BARQ_topic in its config) and the
+                   two are the same string on every stack we run. */
+                this->barq_topic_             = get_str("BARQ_topic", fallback_topic);
+                this->barq_retry_delay_ms_    = get_int("BARQ_retry_delay_ms", 100);
+                /* 100 x 100 ms = 10 s, and it is deliberately generous: the stack is
+                   started downstream-first and the driver -- the only process that
+                   creates the segment -- comes up seconds later. cuda_cone_rush had
+                   this budget too short and spent a whole study on the ROS2 fallback
+                   while labelling every row transport=barq. This node has no such
+                   fallback (see barqTryConnect), but the wait still has to cover the
+                   warmup or it dies on a race instead of running. */
+                this->barq_max_retries_       = get_int("BARQ_max_retries", 100);
+                this->barq_polling_rate_ms_   = get_dbl("BARQ_polling_rate_ms", 1.0);
+                this->barq_writer_timeout_ms_ = get_int("BARQ_writer_timeout_ms", 1000);
+
+                /* MUST match the writer's kMaxPoints. Reader::init() derives the
+                   address of the second buffer from this value alone
+                   (base + alignUp(max_size, 64)), so a mismatch does not fail --
+                   it silently reads garbage on every other frame. */
+                const size_t kMaxPoints = 300000;
+                this->barq_max_size_ = sizeof(BARQFrameHeader) + kMaxPoints * sizeof(BARQPoint) + 512;
+            }
+
+            void barqReaderInit(){
+                RCLCPP_INFO(this->get_logger(), "BARQ: attaching to segment '%s' (poll %.4f ms)",
+                            this->barq_topic_.c_str(), this->barq_polling_rate_ms_);
+                this->barq_retries_ = 0;
+                /* A timer, not a retry loop: this runs from the constructor, and
+                   blocking here would also delay the IMU subscription created just
+                   below it. The IMU stream does not wait for the LiDAR -- burning
+                   ten seconds of it before subscribing costs the calibration window
+                   for no reason. */
+                this->barq_connect_timer_ = create_wall_timer(
+                        std::chrono::milliseconds(this->barq_retry_delay_ms_),
+                        std::bind(&LimoWrapper::barqTryConnect, this), this->lidar_cbg_);
+            }
+
+            void barqTryConnect(){
+                this->barq_reader_ = std::make_unique<BARQ::Reader>(this->barq_topic_, this->barq_max_size_);
+
+                /* isWriterAlive as well as init, because a segment OUTLIVES the
+                   process that made it: Writer::destroy() unlinks it, but a driver
+                   that is killed rather than shut down never gets there and leaves
+                   a perfectly mappable region behind with a stale heartbeat.
+                   Attaching to that succeeds, delivers nothing, and is torn down a
+                   second later by the health check -- observed as a re-attach loop
+                   once per second until the stale segment finally went away.
+                   Writer::init() stamps the heartbeat before the first write, so a
+                   genuinely fresh writer passes this immediately. */
+                if(this->barq_reader_->init() &&
+                   this->barq_reader_->isWriterAlive(static_cast<uint32_t>(this->barq_writer_timeout_ms_))){
+                    this->barq_connect_timer_->cancel();
+                    this->barq_connect_timer_.reset();
+                    this->barq_retries_ = 0;
+
+                    /* duration<double, milli>, NOT std::chrono::milliseconds: the
+                       latter has an integral rep, so its converting constructor is
+                       disabled for a floating-point argument and a sub-millisecond
+                       period does not truncate, it fails to compile. */
+                    this->barq_poll_timer_ = create_wall_timer(
+                            std::chrono::duration<double, std::milli>(this->barq_polling_rate_ms_),
+                            std::bind(&LimoWrapper::barqPoll, this), this->lidar_cbg_);
+                    this->barq_health_timer_ = create_wall_timer(
+                            std::chrono::milliseconds(this->barq_writer_timeout_ms_),
+                            std::bind(&LimoWrapper::barqCheckWriterHealth, this), this->lidar_cbg_);
+
+                    RCLCPP_INFO(this->get_logger(), "BARQ: reader attached to '%s'", this->barq_topic_.c_str());
+                    return;
+                }
+
+                this->barq_reader_.reset();
+                if(++this->barq_retries_ >= this->barq_max_retries_){
+                    /* NO ROS2 FALLBACK, on purpose, and this is the one place where
+                       this node deliberately dies rather than degrade. A reader that
+                       quietly switches transport keeps publishing perfectly good
+                       odometry under a label that is now a lie, and the only symptom
+                       is a latency number that is not the one anybody meant to take.
+                       Losing the node is loud; losing the measurement is not. */
+                    RCLCPP_ERROR_STREAM(this->get_logger(), "\n-------------------------------------------------------------------\n"
+                                        << "FAST_LIMO::FATAL ERROR: no BARQ writer on '" << this->barq_topic_ << "' after "
+                                        << this->barq_max_retries_ << " x " << this->barq_retry_delay_ms_ << " ms.\n"
+                                        << "          Is the Hesai driver up with BARQ_enable: true and a matching\n"
+                                        << "          BARQ_topic? There is no ROS2 fallback here by design -- it would\n"
+                                        << "          silently turn a BARQ run into a ROS2 run.\n"
+                                        << "-------------------------------------------------------------------\n"
+                                        );
+                    this->barq_connect_timer_->cancel();
+                    rclcpp::shutdown();
+                    return;
+                }
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                        "BARQ: no writer on '%s' yet (%d/%d)", this->barq_topic_.c_str(),
+                        this->barq_retries_, this->barq_max_retries_);
+            }
+
+            void barqCheckWriterHealth(){
+                if(!this->barq_reader_ || this->barq_reader_->isWriterAlive(
+                            static_cast<uint32_t>(this->barq_writer_timeout_ms_))) return;
+
+                RCLCPP_ERROR(this->get_logger(), "BARQ: writer heartbeat lost on '%s', re-attaching",
+                             this->barq_topic_.c_str());
+
+                /* Tear the old timers down BEFORE re-attaching. barqReaderInit only
+                   creates, so re-entering it while the poll timer still exists would
+                   leave a second one running against a stale reader. */
+                this->barq_poll_timer_->cancel();
+                this->barq_poll_timer_.reset();
+                this->barq_health_timer_->cancel();
+                this->barq_health_timer_.reset();
+                this->barq_reader_->destroy();
+                this->barq_reader_.reset();
+
+                this->barqReaderInit();
+            }
+
+            /* BARQ entry point. Same pipeline as the other two, different source. */
+            void barqPoll(){
+                size_t  sz = 0;
+                int64_t ts = 0;
+                const void* ptr = this->barq_reader_->getLatest(sz, ts);
+
+                // getLatest() returns nullptr when the sequence number has not moved
+                if(!ptr || sz == 0) return;
+
+#ifdef LATENCY_TESTING
+                /* The POLL THAT FOUND THE DATA, not the instant it arrived -- there
+                   is no callback here to be woken. So this arm's delivery figure
+                   carries up to BARQ_polling_rate_ms of poll (half of it on average)
+                   that is not transport. Say so wherever it is plotted; it is the
+                   one arm whose number is not purely the transport's. */
+                this->latency_t_in_ = latencyMonotonicNs();
+#endif
+
+                fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
+                static bool pc_in_good_shape = this->checkPointcloudStructure(loc.get_sensor_type());
+
+                if(not pc_in_good_shape){
+                    throw std::runtime_error("FAST_LIMO::FATAL ERROR: invalid pointcloud structure\n\n");
+                }
+
+                const uint8_t* buf = static_cast<const uint8_t*>(ptr);
+
+                BARQFrameHeader hdr;
+                if(sz < sizeof(hdr)){
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                            "BARQ: runt frame (%zu bytes, header is %zu)", sz, sizeof(hdr));
+                    return;
+                }
+                std::memcpy(&hdr, buf, sizeof(hdr));
+
+                /* Checked on EVERY frame, not behind a verbose flag: this is a raw
+                   pointer into another process's memory and the length is the only
+                   thing standing between a short write and a read past the buffer. */
+                if(hdr.point_step != sizeof(BARQPoint) ||
+                   sizeof(hdr) + static_cast<size_t>(hdr.width) * hdr.point_step > sz){
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                            "BARQ: bad frame (width %u, point_step %u, %zu bytes) -- dropped",
+                            hdr.width, hdr.point_step, sz);
+                    return;
+                }
+
+                pcl::PointCloud<PointType>::Ptr pc_ (std::make_shared<pcl::PointCloud<PointType>>());
+                this->fromBARQtoLimo(buf + sizeof(hdr), hdr.width, *pc_);
+
+                /* Frame START time, in seconds, and already on the same clock as the
+                   PointCloud2 header stamp and the BoundedPointcloud stamp: the
+                   driver adds driver_start_timestamp_ to it (and to every per-point
+                   time, which is what the deskew below reads as max_point_time). */
+                this->lidar_callback(pc_, hdr.timestamp);
+            }
+
+            void fromBARQtoLimo(const uint8_t* points, uint32_t n_points, pcl::PointCloud<PointType>& out){
+
+                out.points.resize(n_points);
+                out.width    = n_points;
+                out.height   = 1;
+                out.is_dense = false;
+
+                const uint8_t* p = points;
+                for(uint32_t i=0; i < n_points; i++, p += sizeof(BARQPoint)){
+                    PointType& pt = out.points[i];
+                    std::memcpy(&pt.x,         p +  0, 4);
+                    std::memcpy(&pt.y,         p +  4, 4);
+                    std::memcpy(&pt.z,         p +  8, 4);
+                    std::memcpy(&pt.intensity, p + 12, 4);
+                    std::memcpy(&pt.timestamp, p + 18, 8); // NOTE: ring (offset 16, UINT16) is unused by fast_limo
+                }
+            }
+            #endif
+
             /* Common LiDAR pipeline (input agnostic). All outputs are standard PointCloud2. */
             void lidar_callback(pcl::PointCloud<PointType>::Ptr& pc_, double stamp) {
 
                 fast_limo::Localizer& loc = fast_limo::Localizer::getInstance();
 
                 loc.updatePointCloud(pc_, stamp);
+
+#ifdef LATENCY_TESTING
+                /* t_out HERE, before the publishes below, and this node is the
+                   one place in the stack where that is not the usual rule. */
+                const int64_t t_out = latencyMonotonicNs();
+#endif
 
                 /* NOTE: every pointcloud below is serialized on publish (~32 B/point), so all of
                     them are gated on having at least one subscriber. Nobody listening, no cost. */
@@ -221,7 +538,7 @@ namespace ros2wrap {
 
                 // Publish debugging pointclouds
                 if(this->debug){
-                this->publishPointCloud(this->orig_pub,     loc.get_orig_pointcloud(),     this->body_frame);
+                this->publishPointCloud(this->orig_pub,     loc.get_orig_pointcloud(),     this->lidar_frame);
                 this->publishPointCloud(this->desk_pub,     loc.get_deskewed_pointcloud(), this->world_frame);
                 this->publishPointCloud(this->match_pub,    loc.get_pc2match_pointcloud(), this->body_frame);
                 this->publishPointCloud(this->finalraw_pub, loc.get_finalraw_pointcloud(), this->world_frame);
@@ -234,6 +551,23 @@ namespace ros2wrap {
                     this->match_points_pub->publish(match_markers);
                 }
                 }
+
+#ifdef LATENCY_TESTING
+                /* Published LAST, after both instants are already in hand, so the
+                   instrumentation is outside every interval it reports.
+
+                   `stamp` is the cloud's capture time in seconds, the same value
+                   the driver's frame tick carries -- so this joins against the
+                   tick with no per-transport special casing. A double at epoch
+                   scale has ~240 ns of ULP, well inside the monitor's 1 ms
+                   match window. */
+                mmr_base::msg::LatencySample lm;
+                lm.frame_stamp = rclcpp::Time(static_cast<int64_t>(stamp * 1e9));
+                lm.t_in = this->latency_t_in_;
+                lm.t_out = t_out;
+                lm.seq = this->latency_seq_++;
+                if (this->latency_sample_pub_) this->latency_sample_pub_->publish(lm);
+#endif
             }
 
             void imu_callback(const sensor_msgs::msg::Imu & msg) {
@@ -280,6 +614,18 @@ namespace ros2wrap {
                 this->world_frame = world_p.as_string();
                 this->body_frame = body_p.as_string();
 
+                /* The frame the raw input cloud arrives in. Only /fast_limo/original
+                   is published in it -- that topic is the untransformed input scan,
+                   so labelling it `body` claims an extrinsic that has not been
+                   applied (see docs/FRAMES.md rule 8). Optional: params files
+                   predating this key fall back to `body`, which is what the topic
+                   used to claim. */
+                rclcpp::Parameter lidar_p;
+                if (this->get_parameter("frames.lidar", lidar_p))
+                    this->lidar_frame = lidar_p.as_string();
+                else
+                    this->lidar_frame = this->body_frame;
+
                 // General
                 rclcpp::Parameter n_thread_p = this->get_parameter("num_threads");
                 config->num_threads = n_thread_p.as_int();
@@ -293,6 +639,12 @@ namespace ros2wrap {
                 config->ikfom.estimate_extrinsics = extr_p.as_bool();
                 rclcpp::Parameter offset_p = this->get_parameter("time_offset");
                 config->time_offset = offset_p.as_bool();
+                /* Parameters here come from the YAML via
+                   automatically_declare_parameters_from_overrides, so this must
+                   NOT declare_parameter (that throws AlreadyDeclared). Guarded
+                   so an older params file without the key still starts. */
+                config->time_offset_tau = this->has_parameter("time_offset_tau")
+                        ? this->get_parameter("time_offset_tau").as_double() : 0.0;
                 rclcpp::Parameter eos_p = this->get_parameter("end_of_sweep");
                 config->end_of_sweep = eos_p.as_bool();
 
@@ -486,7 +838,16 @@ namespace ros2wrap {
 
             void fromLimoToROS(const fast_limo::State& in, nav_msgs::msg::Odometry& out){
                 out.header.stamp = this->get_clock()->now();
-                out.header.frame_id = "map";
+                /* Both frames come from the "frames" params, the same ones
+                   broadcastTF() uses, so the message and the TF cannot disagree.
+                   frame_id used to be hardcoded "map" (wrong as soon as
+                   frames.world is changed) and child_frame_id was never set at
+                   all, which leaves it empty: malformed by the nav_msgs/Odometry
+                   contract, and it propagates -- cuda_cone_fused inherits it for
+                   /Odometry and then broadcasts "track -> ", a transform strict
+                   consumers such as Foxglove drop outright. */
+                out.header.frame_id = this->world_frame;
+                out.child_frame_id  = this->body_frame;
 
                 // Pose/Attitude
                 Eigen::Vector3d pos = in.p.cast<double>();
@@ -552,18 +913,22 @@ namespace ros2wrap {
                 tf_broadcaster_->sendTransform(tf_msg);
             }
 
-            #ifdef ENABLE_ZERO_COPY
+            /* Shared by BOTH fixed-layout transports: BoundedPointcloud and the BARQ
+               frame are the same 26 bytes per point (compare the two layouts), so
+               the compatibility question they raise is one question, not two. */
+            #if defined(ENABLE_ZERO_COPY) || defined(ENABLE_BARQ)
             bool checkPointcloudStructure(fast_limo::SensorType sensor){
 
-                /* NOTE: BoundedPointcloud carries no PointField metadata, its layout is fixed at
-                    compile time and its timestamp field is an absolute FLOAT64, so it can only
-                    feed a HESAI/LIVOX alike configuration. */
+                /* NOTE: neither BoundedPointcloud nor a BARQ frame carries PointField
+                    metadata, their layout is fixed at compile time and the timestamp
+                    field is an absolute FLOAT64, so they can only feed a HESAI/LIVOX
+                    alike configuration. */
 
                 if( (sensor == fast_limo::SensorType::HESAI) || (sensor == fast_limo::SensorType::LIVOX) )
                     return true;
 
                 RCLCPP_ERROR_STREAM(this->get_logger(), "\n-------------------------------------------------------------------\n"
-                                    << "FAST_LIMO::FATAL ERROR: zero copy (BoundedPointcloud) input is only compatible\n"
+                                    << "FAST_LIMO::FATAL ERROR: fixed-layout input (BoundedPointcloud / BARQ) is only compatible\n"
                                     << "          with HESAI/LIVOX alike pointclouds, as its fixed layout is:\n"
                                     << "                  x: FLOAT32 (offset 0)\n"
                                     << "                  y: FLOAT32 (offset 4)\n"
@@ -571,7 +936,7 @@ namespace ros2wrap {
                                     << "                  intensity: FLOAT32 (offset 12)\n"
                                     << "                  ring: UINT16 (offset 16)\n"
                                     << "                  timestamp: FLOAT64 (offset 18, global time in seconds)\n"
-                                    << "          Either set sensor_type to 2 (HESAI) / 3 (LIVOX) or disable zero_copy.\n"
+                                    << "          Either set sensor_type to 2 (HESAI) / 3 (LIVOX) or disable zero_copy/BARQ_enabled.\n"
                                     << "-------------------------------------------------------------------\n"
                                     );
 

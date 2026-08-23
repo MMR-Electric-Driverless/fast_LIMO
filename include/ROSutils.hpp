@@ -35,6 +35,13 @@
 #include <mmr_base/msg/bounded_pointcloud.hpp> // zero copy pointcloud
 #endif
 
+#ifdef ENABLE_BARQ
+#include <chrono>
+#include <cstring>
+#include <barq/barq.hpp>      // shared-memory transport
+#include <barq/barq_pcl.hpp>  // BARQFrameHeader / BARQPoint wire layout
+#endif
+
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 

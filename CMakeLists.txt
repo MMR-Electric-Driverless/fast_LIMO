@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(fast_limo)
 
+set(CMAKE_POLICY_DEFAULT_CMP0144 NEW)
+
 # Default to C++17
 add_compile_options(-std=c++17)
 
@@ -8,7 +10,9 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   # -Wpedantic only ever fires inside the vendored IKFoM (mtk) headers, and
   # -Wpsabi is an aarch64 ABI note we cannot act on. IKFoM's own warnings are
   # muted by exposing it as a SYSTEM include dir (see the ikfom target below).
-  add_compile_options(-Wall -Wextra -Wno-psabi)
+  # -Warray-bounds / -Wmaybe-uninitialized are GCC 12+ false positives inside
+  # Eigen 3.4 SIMD paths (JacobiSVD, small fixed-size matrices in esekfom).
+  add_compile_options(-Wall -Wextra -Wno-psabi -Wno-array-bounds -Wno-maybe-uninitialized)
 endif()
 
 # Silences boost/bind.hpp's deprecation pragma, pulled in by esekfom.hpp.
